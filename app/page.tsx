@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useRef, useState, useMemo, useCallback } from "react"
 import { Engine, Model, Vec3 } from "reze-engine"
 import { Button } from "@/components/ui/button"
 import {
@@ -15,16 +15,85 @@ import {
 } from "@/components/ui/menubar"
 import Link from "next/link"
 import Image from "next/image"
+import { BoneList } from "@/components/bone-list"
+import { Timeline, type SelectedKeyframe } from "@/components/timeline"
+import { makeMockClip, BONE_GROUPS } from "@/lib/animation"
 
 const MODEL_PATH = "/models/reze/reze.pmx"
 
-/** Studio shell + WebGPU viewport; keep engineRef/modelRef here for panels/transport later. */
 export default function Home() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const engineRef = useRef<Engine | null>(null)
   const modelRef = useRef<Model | null>(null)
   const [engineError, setEngineError] = useState<string | null>(null)
 
+  // ─── Shared animation state ──────────────────────────────────────────
+  const clip = useMemo(() => makeMockClip(), [])
+  const allBones = useMemo(() => Array.from(clip.boneTracks.keys()), [clip])
+
+  const [currentFrame, setCurrentFrame] = useState(0)
+  const [playing, setPlaying] = useState(false)
+  const [activeBone, setActiveBone] = useState<string | null>(null)
+  const [selectedGroup, setSelectedGroup] = useState("All Bones")
+  const [selectedKeyframes, setSelectedKeyframes] = useState<SelectedKeyframe[]>([])
+
+  const playRef = useRef(false)
+  const lastT = useRef<number | null>(null)
+
+  const visibleBones = useMemo(() => {
+    const g = BONE_GROUPS[selectedGroup]
+    return g || allBones
+  }, [selectedGroup, allBones])
+
+  // ─── Playback loop ───────────────────────────────────────────────────
+  useEffect(() => {
+    playRef.current = playing
+    if (!playing) {
+      lastT.current = null
+      return
+    }
+    let raf: number
+    const tick = (ts: number) => {
+      if (!playRef.current) return
+      if (lastT.current !== null)
+        setCurrentFrame((p) => {
+          const n = p + ((ts - (lastT.current ?? ts)) / 1000) * 30
+          return n >= clip.frameCount ? 0 : n
+        })
+      lastT.current = ts
+      raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [playing, clip.frameCount])
+
+  // ─── Keyboard shortcuts ──────────────────────────────────────────────
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code === "Space") {
+        e.preventDefault()
+        setPlaying((p) => !p)
+      }
+      if (e.code === "ArrowLeft") setCurrentFrame((p) => Math.max(0, Math.round(p) - 1))
+      if (e.code === "ArrowRight") setCurrentFrame((p) => Math.min(clip.frameCount, Math.round(p) + 1))
+      if (e.code === "Home") setCurrentFrame(0)
+      if (e.code === "End") setCurrentFrame(clip.frameCount)
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [clip.frameCount])
+
+  // ─── Bone selection handlers ─────────────────────────────────────────
+  const handleSelectGroup = useCallback((g: string) => {
+    setSelectedGroup(g)
+    setActiveBone(null)
+  }, [])
+
+  const handleSelectBone = useCallback((b: string) => {
+    setActiveBone(b)
+  }, [])
+
+  // ─── Engine init ─────────────────────────────────────────────────────
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
@@ -79,7 +148,7 @@ export default function Home() {
   return (
     <div className="flex h-screen w-full flex-col overflow-hidden text-foreground">
       <div className="flex min-h-0 flex-1">
-        {/* Left 240px */}
+        {/* Left sidebar */}
         <aside className="flex w-[270px] shrink-0 flex-col border-r border-border">
           <div className="shrink-0 border-b">
             <div className="pl-2 pt-0 flex items-center justify-between pb-1">
@@ -154,10 +223,15 @@ export default function Home() {
               </Menubar>
             </div>
           </div>
-          <div className="min-h-0 flex-1 overflow-auto px-3 py-2">
-            <div className="rounded-md border border-dashed border-border bg-muted/30 p-2.5 text-[10px] text-muted-foreground">
-              Bones list (scroll)
-            </div>
+          {/* Bone list */}
+          <div className="min-h-0 flex-1 overflow-hidden">
+            <BoneList
+              allBones={allBones}
+              selectedGroup={selectedGroup}
+              activeBone={activeBone}
+              onSelectGroup={handleSelectGroup}
+              onSelectBone={handleSelectBone}
+            />
           </div>
           <div className="shrink-0 space-y-2 border-t border-border px-3 py-2">
             <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
@@ -169,7 +243,7 @@ export default function Home() {
           </div>
         </aside>
 
-        {/* Center: viewport + graph */}
+        {/* Center: viewport + timeline */}
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <div className="relative min-h-0 flex-1 overflow-hidden">
             <canvas ref={canvasRef} className="block h-full w-full touch-none" />
@@ -179,20 +253,24 @@ export default function Home() {
               </div>
             ) : null}
           </div>
-          <div className="flex h-[200px] shrink-0 flex-col border-t border-border ">
-            <div className="flex h-7 shrink-0 items-center gap-2 border-b border-border px-3 text-[10px] text-muted-foreground">
-              <span>Graph / Dope sheet toolbar</span>
-            </div>
-            <div className="min-h-0 flex-1 px-3 py-2">
-              <div className="flex h-full items-center justify-center rounded-md border border-dashed border-border bg-muted/30 text-[10px] text-muted-foreground">
-                Value graph area
-              </div>
-            </div>
+          {/* Timeline with dopesheet + value graph */}
+          <div className="h-[220px] shrink-0 border-t border-border">
+            <Timeline
+              clip={clip}
+              currentFrame={currentFrame}
+              setCurrentFrame={setCurrentFrame}
+              playing={playing}
+              setPlaying={setPlaying}
+              activeBone={activeBone}
+              visibleBones={visibleBones}
+              selectedKeyframes={selectedKeyframes}
+              setSelectedKeyframes={setSelectedKeyframes}
+            />
           </div>
         </div>
 
-        {/* Right 240px */}
-        <aside className="flex w-[240px] shrink-0 flex-col border-l border-border ">
+        {/* Right sidebar */}
+        <aside className="flex w-[240px] shrink-0 flex-col border-l border-border">
           <div className="flex min-h-9 shrink-0 items-center border-b border-border px-3 py-2 text-xs font-medium text-muted-foreground">
             Selection / props
           </div>
@@ -209,25 +287,6 @@ export default function Home() {
           </div>
         </aside>
       </div>
-
-      <footer className="flex h-12 shrink-0 items-center gap-2 border-t border-border  px-3">
-        <div className="flex items-center gap-1">
-          <Button type="button" variant="secondary" size="icon" className="size-8" aria-label="First frame">
-            ⏮
-          </Button>
-          <Button type="button" variant="secondary" size="icon" className="size-8" aria-label="Previous frame">
-            ◀
-          </Button>
-          <Button type="button" size="icon" className="size-9" aria-label="Play">
-            ▶
-          </Button>
-        </div>
-        <div className="rounded-md border border-border bg-muted/50 px-2 py-1 font-mono text-xs tabular-nums text-muted-foreground">
-          F000 / 120
-        </div>
-        <div className="h-6 min-w-0 flex-1 rounded-md border border-dashed border-border bg-muted/30" />
-        <span className="shrink-0 text-[10px] text-muted-foreground">30 fps</span>
-      </footer>
     </div>
   )
 }
