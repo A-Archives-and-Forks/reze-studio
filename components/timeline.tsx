@@ -59,6 +59,8 @@ function TimelineCanvas({
   onMoveCurveKeyframe,
 }: TimelineCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const rafRef = useRef<number | null>(null)
+  const sizeRef = useRef({ w: 0, h: 0, dpr: 0 })
   const drag = useRef<{
     type: string
     frame?: number
@@ -87,12 +89,19 @@ function TimelineCanvas({
     if (!el) return
     const ctx = el.getContext("2d")
     if (!ctx) return
-    const dpr = window.devicePixelRatio || 1
+    const dpr = Math.min(4, Math.max(1, (window.devicePixelRatio || 1) * 1.5))
     const w = el.clientWidth,
       h = el.clientHeight
-    el.width = w * dpr
-    el.height = h * dpr
-    ctx.scale(dpr, dpr)
+    const backingW = Math.max(1, Math.floor(w * dpr))
+    const backingH = Math.max(1, Math.floor(h * dpr))
+    const size = sizeRef.current
+    if (size.w !== backingW || size.h !== backingH || size.dpr !== dpr) {
+      el.width = backingW
+      el.height = backingH
+      sizeRef.current = { w: backingW, h: backingH, dpr }
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    ctx.clearRect(0, 0, w, h)
 
     const ox = LABEL_W - scrollX
     const dopeY = h - DOPE_H
@@ -380,7 +389,17 @@ function TimelineCanvas({
   }, [clip, pxPerFrame, scrollX, currentFrame, activeBone, visibleBones, selectedKeyframes, tab, getDopeFrames])
 
   useEffect(() => {
-    draw()
+    if (rafRef.current !== null) cancelAnimationFrame(rafRef.current)
+    rafRef.current = requestAnimationFrame(() => {
+      rafRef.current = null
+      draw()
+    })
+    return () => {
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current)
+        rafRef.current = null
+      }
+    }
   }, [draw])
 
   useEffect(() => {
@@ -752,7 +771,7 @@ export function Timeline({
           clip={clip}
           pxPerFrame={pxPerFrame}
           scrollX={scrollX}
-          currentFrame={Math.round(currentFrame)}
+          currentFrame={currentFrame}
           activeBone={activeBone}
           visibleBones={visibleBones}
           selectedKeyframes={selectedKeyframes}
