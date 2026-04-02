@@ -23,7 +23,7 @@ import { AxisSliderRow } from "@/components/axis-slider-row"
 import { InterpolationCurveEditor, PRESETS, type CurvePoint } from "@/components/interpolation-curve-editor"
 import { cn } from "@/lib/utils"
 
-/** Must match `loadAnimation` name in app/page (engine clip vs React state). */
+/** Must match `loadClip` name in app/page (engine clip vs React state). */
 const STUDIO_ANIM_NAME = "studio"
 
 function sampleBoneKeyframe(clip: AnimationClip | null, boneName: string, frame: number) {
@@ -168,7 +168,7 @@ export function PropertiesInspector({
       if (!activeBone || !clip || !model) return
       const frame = Math.round(Math.max(0, Math.min(clip.frameCount, currentFrame)))
       const atKey = findKeyframeAt(clip, activeBone, frame)
-      model.loadAnimation(STUDIO_ANIM_NAME, clip)
+      model.loadClip(STUDIO_ANIM_NAME, clip)
       model.seek(Math.max(0, currentFrame) / 30)
       let q: Quat
       if (atKey) {
@@ -195,7 +195,7 @@ export function PropertiesInspector({
       if (!activeBone || !clip || !model) return
       const frame = Math.round(Math.max(0, Math.min(clip.frameCount, currentFrame)))
       const atKey = findKeyframeAt(clip, activeBone, frame)
-      model.loadAnimation(STUDIO_ANIM_NAME, clip)
+      model.loadClip(STUDIO_ANIM_NAME, clip)
       model.seek(Math.max(0, currentFrame) / 30)
       if (atKey) {
         const t = atKey.translation

@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useRef, useState, useMemo, useCallback } from "react"
+import { useEffect, useRef, useState, useMemo, useCallback, type ChangeEvent } from "react"
 import { Engine, Model, Vec3 } from "reze-engine"
 import { Button } from "@/components/ui/button"
 import {
@@ -21,11 +21,35 @@ import { PropertiesInspector } from "@/components/properties-inspector"
 import { Timeline, type SelectedKeyframe } from "@/components/timeline"
 import { BONE_GROUPS, quatToEuler } from "@/lib/animation"
 import { interpolationTemplateForFrame, readLocalPoseAfterSeek } from "@/lib/keyframe-insert"
+import { animationClipFromJson, animationClipToJsonString } from "@/lib/clip-json"
 import type { AnimationClip } from "reze-engine"
 
 const MODEL_PATH = "/models/reze/reze.pmx"
 const VMD_PATH = "/animations/miku.vmd"
 const STUDIO_ANIM_NAME = "studio"
+
+function downloadBlob(blob: Blob, filename: string) {
+  const a = document.createElement("a")
+  const url = URL.createObjectURL(blob)
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+/** Stem of a path or file name (`/animations/miku.vmd` → `miku`). */
+function fileStem(pathOrName: string): string {
+  const base = pathOrName.replace(/^.*[/\\]/, "")
+  const i = base.lastIndexOf(".")
+  return (i > 0 ? base.slice(0, i) : base).trim() || "clip"
+}
+
+/** One safe path segment for downloads (no slashes or reserved characters). */
+function sanitizeClipFilenameBase(name: string): string {
+  const s = name.trim() || "clip"
+  const cleaned = s.replace(/[/\\<>:"|?*\x00-\x1f]/g, "-").replace(/-+/g, "-")
+  return cleaned.slice(0, 120).replace(/^-|-$/g, "") || "clip"
+}
 
 export default function Home() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -33,8 +57,15 @@ export default function Home() {
   const modelRef = useRef<Model | null>(null)
   const [engineError, setEngineError] = useState<string | null>(null)
 
-  // ─── Clip from VMD (via engine loadAnimation → getAnimationClip) ─────
+  // ─── Clip synced with engine via loadClip(STUDIO_ANIM_NAME) / getClip ──
   const [clip, setClip] = useState<AnimationClip | null>(null)
+  /** Model finished loading (file menu + export need a live Model instance). */
+  const [studioReady, setStudioReady] = useState(false)
+  /** User-facing clip label for default save names (`{clipDisplayName}-export.vmd` / `.json`). */
+  const [clipDisplayName, setClipDisplayName] = useState("clip")
+
+  const vmdInputRef = useRef<HTMLInputElement>(null)
+  const jsonInputRef = useRef<HTMLInputElement>(null)
   const frameCount = clip?.frameCount ?? 0
   /** PMX skeleton bone names; used to hide VMD tracks that do not exist on the loaded model. */
   const [pmxBoneNames, setPmxBoneNames] = useState<ReadonlySet<string>>(new Set())
@@ -173,21 +204,20 @@ export default function Home() {
           setMorphNames(model.getMorphing().morphs.map((m) => m.name))
           model.setMorphWeight("抗穿模", 0.5)
           try {
-            await model.loadAnimation(STUDIO_ANIM_NAME, VMD_PATH)
+            await model.loadVmd(STUDIO_ANIM_NAME, VMD_PATH)
             if (disposed) return
-            const c = model.getAnimationClip(STUDIO_ANIM_NAME)
+            const c = model.getClip(STUDIO_ANIM_NAME)
             if (c) {
               setClip(c)
-              model.play(STUDIO_ANIM_NAME, { loop: false })
-              if (model.name === "reze") {
-                model.setMorphWeight("抗穿模", 0.5)
-              }
-              model.pause()
+              setClipDisplayName(sanitizeClipFilenameBase(fileStem(VMD_PATH)))
+              model.show(STUDIO_ANIM_NAME)
               model.seek(0)
+              if (model.name === "reze") model.setMorphWeight("抗穿模", 0.5)
             }
           } catch (e) {
             console.warn(`VMD load failed — add file at public${VMD_PATH}`, e)
           }
+          setStudioReady(true)
         } catch {
           setEngineError(`Add model at public${MODEL_PATH}`)
         }
@@ -204,6 +234,7 @@ export default function Home() {
 
     return () => {
       disposed = true
+      setStudioReady(false)
       setPmxBoneNames(new Set())
       setMorphNames([])
       setActiveMorph(null)
@@ -219,7 +250,7 @@ export default function Home() {
   useEffect(() => {
     const model = modelRef.current
     if (!model || !clip) return
-    model.loadAnimation(STUDIO_ANIM_NAME, clip)
+    model.loadClip(STUDIO_ANIM_NAME, clip)
     model.seek(Math.max(0, currentFrame) / 30)
     if (!activeMorph) {
       setMorphWeightReadout(null)
@@ -291,7 +322,7 @@ export default function Home() {
     const model = modelRef.current
     if (!model || !activeBone || !clip) return null
     // React clip can fork from the engine’s internal clip; push state back before seek/read so sliders stay in sync
-    model.loadAnimation(STUDIO_ANIM_NAME, clip)
+    model.loadClip(STUDIO_ANIM_NAME, clip)
     model.seek(Math.max(0, currentFrame) / 30)
     const p = readLocalPoseAfterSeek(model, activeBone)
     if (!p) return null
@@ -305,7 +336,7 @@ export default function Home() {
     const model = modelRef.current
     if (!clip || !activeBone || activeMorph || !model) return
     const frame = Math.round(Math.max(0, Math.min(clip.frameCount, currentFrame)))
-    model.loadAnimation(STUDIO_ANIM_NAME, clip)
+    model.loadClip(STUDIO_ANIM_NAME, clip)
     model.seek(Math.max(0, currentFrame) / 30)
     const pose = readLocalPoseAfterSeek(model, activeBone)
     if (!pose) return
@@ -328,6 +359,83 @@ export default function Home() {
     setSelectedKeyframes([{ type: "curve", bone: activeBone, frame, channel: "rx" }])
   }, [clip, activeBone, activeMorph, currentFrame])
 
+  const syncStudioAfterNewClip = useCallback((model: Model) => {
+    setCurrentFrame(0)
+    setPlaying(false)
+    setSelectedKeyframes([])
+    model.show(STUDIO_ANIM_NAME)
+    model.seek(0)
+    if (model.name === "reze") model.setMorphWeight("抗穿模", 0.5)
+  }, [])
+
+  const onPickVmdFile = useCallback(
+    async (e: ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0]
+      e.target.value = ""
+      const model = modelRef.current
+      if (!file || !model) return
+      const url = URL.createObjectURL(file)
+      try {
+        await model.loadVmd(STUDIO_ANIM_NAME, url)
+        const c = model.getClip(STUDIO_ANIM_NAME)
+        if (c) {
+          setClip(c)
+          setClipDisplayName(sanitizeClipFilenameBase(fileStem(file.name)))
+          syncStudioAfterNewClip(model)
+        }
+      } catch (err) {
+        window.alert(err instanceof Error ? err.message : String(err))
+      } finally {
+        URL.revokeObjectURL(url)
+      }
+    },
+    [syncStudioAfterNewClip],
+  )
+
+  const onPickJsonClip = useCallback(
+    async (e: ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0]
+      e.target.value = ""
+      const model = modelRef.current
+      if (!file || !model) return
+      try {
+        const text = await file.text()
+        const parsed = animationClipFromJson(text)
+        model.loadClip(STUDIO_ANIM_NAME, parsed)
+        setClip(parsed)
+        setClipDisplayName(sanitizeClipFilenameBase(fileStem(file.name)))
+        syncStudioAfterNewClip(model)
+      } catch (err) {
+        window.alert(err instanceof Error ? err.message : String(err))
+      }
+    },
+    [syncStudioAfterNewClip],
+  )
+
+  const exportClipVmd = useCallback(() => {
+    const model = modelRef.current
+    if (!model || !clip) return
+    const base = sanitizeClipFilenameBase(clipDisplayName)
+    try {
+      model.loadClip(STUDIO_ANIM_NAME, clip)
+      const buf = model.exportVmd(STUDIO_ANIM_NAME)
+      downloadBlob(new Blob([buf], { type: "application/octet-stream" }), `${base}-export.vmd`)
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : String(err))
+    }
+  }, [clip, clipDisplayName])
+
+  const exportClipJson = useCallback(() => {
+    if (!clip) return
+    const base = sanitizeClipFilenameBase(clipDisplayName)
+    try {
+      const text = animationClipToJsonString(clip)
+      downloadBlob(new Blob([text], { type: "application/json;charset=utf-8" }), `${base}-export.json`)
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : String(err))
+    }
+  }, [clip, clipDisplayName])
+
   return (
     <div className="flex h-screen w-full flex-col overflow-hidden text-foreground">
       <div className="flex min-h-0 flex-1">
@@ -346,6 +454,24 @@ export default function Home() {
             </div>
 
             <div className="px-3 pb-2">
+              <input
+                ref={vmdInputRef}
+                type="file"
+                accept=".vmd"
+                className="hidden"
+                tabIndex={-1}
+                aria-hidden
+                onChange={onPickVmdFile}
+              />
+              <input
+                ref={jsonInputRef}
+                type="file"
+                accept=".json,application/json"
+                className="hidden"
+                tabIndex={-1}
+                aria-hidden
+                onChange={onPickJsonClip}
+              />
               <Menubar className="h-4 gap-0 rounded-none border-0 bg-transparent p-0 shadow-none">
                 <MenubarMenu>
                   <MenubarTrigger className="h-4 rounded-sm px-1.5 py-0 text-xs font-normal text-muted-foreground">
@@ -356,17 +482,39 @@ export default function Home() {
                     className="min-w-[10.5rem] p-0.5 text-xs"
                   >
                     <MenubarGroup>
-                      <MenubarItem className="gap-2 py-1 pl-2 pr-1.5 text-xs">
-                        Load model…
+                      <MenubarItem className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground" disabled>
+                        Load PMX model…
                       </MenubarItem>
-                      <MenubarItem className="gap-2 py-1 pl-2 pr-1.5 text-xs">
-                        Load animation…
+                      <MenubarItem
+                        className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
+                        disabled={!studioReady}
+                        onSelect={() => vmdInputRef.current?.click()}
+                      >
+                        Load VMD…
+                      </MenubarItem>
+                      <MenubarItem
+                        className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
+                        disabled={!studioReady}
+                        onSelect={() => jsonInputRef.current?.click()}
+                      >
+                        Load JSON clip…
                       </MenubarItem>
                     </MenubarGroup>
                     <MenubarSeparator className="my-0.5" />
                     <MenubarGroup>
-                      <MenubarItem className="gap-2 py-1 pl-2 pr-1.5 text-xs">
-                        Export…
+                      <MenubarItem
+                        className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
+                        disabled={!studioReady || !clip}
+                        onSelect={exportClipVmd}
+                      >
+                        Export VMD…
+                      </MenubarItem>
+                      <MenubarItem
+                        className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
+                        disabled={!clip}
+                        onSelect={exportClipJson}
+                      >
+                        Export JSON…
                       </MenubarItem>
                     </MenubarGroup>
                   </MenubarContent>

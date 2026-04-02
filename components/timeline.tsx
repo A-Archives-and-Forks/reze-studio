@@ -14,24 +14,120 @@ import {
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import {
+  type Channel,
   type AnimationClip,
   type BoneKeyframe,
-  C,
-  FONT,
-  DOPE_H,
-  RULER_H,
-  LABEL_W,
-  DOT_R,
-  DIAMOND,
-  MAX_PX,
-  minPxPerFrameForViewport,
-  TABS,
+  ROT_CHANNELS,
+  TRA_CHANNELS,
   boneDisplayLabel,
-  getChannelsForTab,
-  getAxisConfig,
-  bezierY,
-  ALL_CHANNELS,
 } from "@/lib/animation"
+
+// ─── Timeline constants ─────────────────────────────────────────────────
+const DOPE_H = 34
+const RULER_H = 17
+const LABEL_W = 36
+const DOT_R = 3.5
+const DIAMOND = 5
+const MIN_PX = 0.5
+const MAX_PX = 40
+
+function minPxPerFrameForViewport(trackWidthPx: number, frameCount: number): number {
+  if (frameCount <= 0 || trackWidthPx <= LABEL_W + 1) return MIN_PX
+  const fit = (trackWidthPx - LABEL_W) / frameCount
+  return Math.max(MIN_PX, Math.min(fit, MAX_PX))
+}
+
+function bezierY(cp0: { x: number; y: number }, cp1: { x: number; y: number }, t: number) {
+  const x1 = cp0.x / 127,
+    y1 = cp0.y / 127,
+    x2 = cp1.x / 127,
+    y2 = cp1.y / 127
+  let lo = 0,
+    hi = 1,
+    mid = 0.5
+  for (let i = 0; i < 15; i++) {
+    const x = 3 * (1 - mid) ** 2 * mid * x1 + 3 * (1 - mid) * mid ** 2 * x2 + mid ** 3
+    if (Math.abs(x - t) < 0.0001) break
+    if (x < t) lo = mid
+    else hi = mid
+    mid = (lo + hi) / 2
+  }
+  return 3 * (1 - mid) ** 2 * mid * y1 + 3 * (1 - mid) * mid ** 2 * y2 + mid ** 3
+}
+
+const C = {
+  bg: "rgba(0,0,0,0)",
+  curveBg: "rgba(0,0,0,0)",
+  ruler: "rgba(0,0,0,0)",
+  rulerText: "#9ca3af",
+  rulerTick: "#2a2a34",
+  rulerMajor: "#3a3a48",
+  grid: "#161620",
+  axis: "#222233",
+  axisZero: "#2c2c44",
+  playhead: "#d83838",
+  playheadGlow: "rgba(216,56,56,0.18)",
+  diamondSel: "#5aa0f0",
+  keyDotSel: "#9ca3af",
+  dopeBg: "rgba(0,0,0,0)",
+  dopeBorder: "#222230",
+  dopeLabel: "#9ca3af",
+  dopeLabelNum: "#6b7280",
+  rotX: "#e25555",
+  rotY: "#44bb55",
+  rotZ: "#4477dd",
+  traX: "#e2a055",
+  traY: "#55bba0",
+  traZ: "#7755dd",
+  label: "#9ca3af",
+  tabBg: "rgba(0,0,0,0)",
+  tabActive: "#2a2a36",
+  tabText: "#9ca3af",
+  tabTextActive: "#9ca3af",
+  toolbarOnAccent: "#0f0f12",
+  border: "border",
+  frameBadge: "#1a1a22",
+  frameBadgeText: "#9ca3af",
+  sidebarBg: "rgba(0,0,0,0)",
+  sidebarGroup: "#888898",
+  sidebarBone: "#666672",
+  sidebarActive: "#5aa0f0",
+  sidebarGroupBg: "rgba(0,0,0,0)",
+  sidebarHover: "#1e1e28",
+} as const
+
+const FONT = "'SF Mono','Cascadia Code','Fira Code','JetBrains Mono',monospace"
+
+const ALL_CHANNELS: Channel[] = [...ROT_CHANNELS, ...TRA_CHANNELS]
+
+function getChannelsForTab(tab: string): Channel[] {
+  if (tab === "allRot") return ROT_CHANNELS
+  if (tab === "allTra") return TRA_CHANNELS
+  const ch = ALL_CHANNELS.find((c) => c.key === tab)
+  return ch ? [ch] : ROT_CHANNELS
+}
+
+function getAxisConfig(tab: string) {
+  const chans = getChannelsForTab(tab)
+  const isRot = chans[0].group === "rot"
+  if (isRot) {
+    return { min: -90, max: 90, unit: "°", side: "left" as const, step: 30, subStep: 15 }
+  } else {
+    return { min: -5, max: 20, unit: "", side: "left" as const, step: 5, subStep: 2.5 }
+  }
+}
+
+const TABS = [
+  { key: "allRot", label: "All Rotations", color: null, sep: false },
+  { key: "rx", label: "X", color: C.rotX, sep: false },
+  { key: "ry", label: "Y", color: C.rotY, sep: false },
+  { key: "rz", label: "Z", color: C.rotZ, sep: false },
+  { key: "_sep", label: "", color: null, sep: true },
+  { key: "allTra", label: "All Translations", color: null, sep: false },
+  { key: "tx", label: "X", color: C.traX, sep: false },
+  { key: "ty", label: "Y", color: C.traY, sep: false },
+  { key: "tz", label: "Z", color: C.traZ, sep: false },
+]
 
 /** Scrub playhead 0…frameCount — track/thumb aligned with toolbar (Tailwind tokens). */
 function TransportFrameSlider({
@@ -815,8 +911,10 @@ export function Timeline({
   setSelectedKeyframes,
 }: TimelineProps) {
   const fc = clip?.frameCount ?? 0
-  const [pxPerFrame, setPxPerFrame] = useState(8)
+  const [pxPerFrame, setPxPerFrame] = useState(4)
   const [scrollX, setScrollX] = useState(0)
+  const scrollXRef = useRef(0)
+  scrollXRef.current = scrollX
   const [tab, setTab] = useState("allRot")
   const [, forceRedraw] = useState(0)
   const timelineAreaRef = useRef<HTMLDivElement>(null)
@@ -842,6 +940,23 @@ export function Timeline({
     const maxScroll = Math.max(0, LABEL_W + fc * pxPerFrame - trackWidth)
     setScrollX((s) => Math.min(maxScroll, Math.max(0, s)))
   }, [trackWidth, fc, pxPerFrame])
+
+  // ── Auto-scroll: page-turn when playhead leaves the visible window ──
+  useEffect(() => {
+    if (trackWidth <= 0) return
+    const viewable = trackWidth - LABEL_W
+    if (viewable <= 0) return
+    const playheadX = currentFrame * pxPerFrame
+    const maxScroll = Math.max(0, LABEL_W + fc * pxPerFrame - trackWidth)
+    const visLeft = scrollXRef.current
+    const visRight = scrollXRef.current + viewable
+
+    if (playheadX >= visLeft && playheadX <= visRight) return
+
+    // Page-turn: place playhead near the left edge of the new page
+    const target = Math.max(0, Math.min(maxScroll, playheadX - viewable * 0.1))
+    setScrollX(target)
+  }, [currentFrame, pxPerFrame, trackWidth, fc])
 
   const onWheel = useCallback(
     (e: React.WheelEvent) => {
