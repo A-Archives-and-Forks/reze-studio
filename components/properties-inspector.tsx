@@ -1,7 +1,7 @@
 "use client"
 
 import type { Dispatch, RefObject, SetStateAction } from "react"
-import { useCallback, useMemo, useState } from "react"
+import { memo, useCallback, useMemo, useState } from "react"
 import type { AnimationClip, BoneInterpolation, BoneKeyframe, Model } from "reze-engine"
 import { Quat, Vec3 } from "reze-engine"
 import { Button } from "@/components/ui/button"
@@ -110,7 +110,7 @@ interface PropertiesInspectorProps {
   onDeleteSelectedKeyframes: () => void
 }
 
-export function PropertiesInspector({
+export const PropertiesInspector = memo(function PropertiesInspector({
   clip,
   currentFrame,
   activeBone,
@@ -378,4 +378,4 @@ export function PropertiesInspector({
       </section>
     </div>
   )
-}
+})

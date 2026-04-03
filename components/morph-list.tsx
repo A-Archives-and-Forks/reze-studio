@@ -1,5 +1,6 @@
 "use client"
 
+import { memo } from "react"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
 
@@ -9,7 +10,7 @@ interface MorphListProps {
   onSelectMorph: (name: string) => void
 }
 
-export function MorphList({ morphNames, activeMorph, onSelectMorph }: MorphListProps) {
+export const MorphList = memo(function MorphList({ morphNames, activeMorph, onSelectMorph }: MorphListProps) {
   return (
     <ScrollArea className="h-full">
       <div className="py-1">
@@ -34,4 +35,4 @@ export function MorphList({ morphNames, activeMorph, onSelectMorph }: MorphListP
       </div>
     </ScrollArea>
   )
-}
+})

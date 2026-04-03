@@ -69,17 +69,23 @@ export default function Home() {
   const frameCount = clip?.frameCount ?? 0
   /** PMX skeleton bone names; used to hide VMD tracks that do not exist on the loaded model. */
   const [pmxBoneNames, setPmxBoneNames] = useState<ReadonlySet<string>>(new Set())
+  /** PMX bone order (skeleton array) — remainder list after clip bones in the sidebar. */
+  const [modelBoneOrder, setModelBoneOrder] = useState<string[]>([])
   /** From `model.getMorphing().morphs` (engine has no `getMorphs()` alias yet). */
   const [morphNames, setMorphNames] = useState<string[]>([])
   const [activeMorph, setActiveMorph] = useState<string | null>(null)
   const [morphWeightReadout, setMorphWeightReadout] = useState<number | null>(null)
 
-  const allBones = useMemo(() => {
+  /** Bones with tracks in the current clip (and on the model) — timeline rows + keying. */
+  const clipBones = useMemo(() => {
     if (!clip) return []
     const keys = Array.from(clip.boneTracks.keys())
     if (pmxBoneNames.size === 0) return keys
     return keys.filter((k) => pmxBoneNames.has(k))
   }, [clip, pmxBoneNames])
+
+  /** Sidebar list: strict PMX skeleton order (same for new clips and edits). */
+  const sidebarBones = modelBoneOrder
 
   const [currentFrame, setCurrentFrame] = useState(0)
   const [playing, setPlaying] = useState(false)
@@ -92,9 +98,9 @@ export default function Home() {
 
   const visibleBones = useMemo(() => {
     const g = BONE_GROUPS[selectedGroup]
-    if (!g) return allBones
-    return g.filter((name) => allBones.includes(name))
-  }, [selectedGroup, allBones])
+    if (!g) return clipBones
+    return g.filter((name) => clipBones.includes(name))
+  }, [selectedGroup, clipBones])
 
   // ─── Playback loop ───────────────────────────────────────────────────
   useEffect(() => {
@@ -159,8 +165,8 @@ export default function Home() {
   }, [])
 
   useEffect(() => {
-    if (activeBone && !allBones.includes(activeBone)) setActiveBone(null)
-  }, [activeBone, allBones])
+    if (activeBone && !pmxBoneNames.has(activeBone)) setActiveBone(null)
+  }, [activeBone, pmxBoneNames])
 
   useEffect(() => {
     if (activeMorph && !morphNames.includes(activeMorph)) setActiveMorph(null)
@@ -168,9 +174,9 @@ export default function Home() {
 
   useEffect(() => {
     setSelectedKeyframes((prev) =>
-      prev.filter((s) => s.type !== "curve" || !s.bone || allBones.includes(s.bone)),
+      prev.filter((s) => s.type !== "curve" || !s.bone || pmxBoneNames.has(s.bone)),
     )
-  }, [allBones])
+  }, [pmxBoneNames])
 
   // ─── Engine init ─────────────────────────────────────────────────────
   useEffect(() => {
@@ -191,38 +197,40 @@ export default function Home() {
         await engine.init()
         if (disposed) return
 
-        engine.setPhysicsEnabled(false)
-        engine.addGround({
-          diffuseColor: new Vec3(0.14, 0.12, 0.16),
-        })
-
         try {
           const model = await engine.loadModel("reze", MODEL_PATH)
           if (disposed) return
           modelRef.current = model
-          setPmxBoneNames(new Set(model.getSkeleton().bones.map((b) => b.name)))
+          const sk = model.getSkeleton().bones.map((b) => b.name)
+          setPmxBoneNames(new Set(sk))
+          setModelBoneOrder(sk)
           setMorphNames(model.getMorphing().morphs.map((m) => m.name))
           model.setMorphWeight("抗穿模", 0.5)
-          try {
-            await model.loadVmd(STUDIO_ANIM_NAME, VMD_PATH)
-            if (disposed) return
-            const c = model.getClip(STUDIO_ANIM_NAME)
-            if (c) {
-              setClip(c)
-              setClipDisplayName(sanitizeClipFilenameBase(fileStem(VMD_PATH)))
-              model.show(STUDIO_ANIM_NAME)
-              model.seek(0)
-              if (model.name === "reze") model.setMorphWeight("抗穿模", 0.5)
-            }
-          } catch (e) {
-            console.warn(`VMD load failed — add file at public${VMD_PATH}`, e)
-          }
-          setStudioReady(true)
+          engine.addGround({
+            diffuseColor: new Vec3(0.14, 0.12, 0.16),
+          })
         } catch {
           setEngineError(`Add model at public${MODEL_PATH}`)
         }
 
         engine.runRenderLoop()
+
+        try {
+          await modelRef.current?.loadVmd(STUDIO_ANIM_NAME, VMD_PATH)
+          if (disposed) return
+          const c = modelRef.current?.getClip(STUDIO_ANIM_NAME)
+          if (c) {
+            setClip(c)
+            setClipDisplayName(sanitizeClipFilenameBase(fileStem(VMD_PATH)))
+            modelRef.current?.show(STUDIO_ANIM_NAME)
+            modelRef.current?.seek(0)
+            if (modelRef.current?.name === "reze") modelRef.current?.setMorphWeight("抗穿模", 0.5)
+          }
+        } catch (e) {
+          console.warn(`VMD load failed — add file at public${VMD_PATH}`, e)
+        }
+        setStudioReady(true)
+
         engineRef.current = engine
       } catch (e) {
         console.error(e)
@@ -235,6 +243,7 @@ export default function Home() {
     return () => {
       disposed = true
       setStudioReady(false)
+      setModelBoneOrder([])
       setPmxBoneNames(new Set())
       setMorphNames([])
       setActiveMorph(null)
@@ -440,11 +449,11 @@ export default function Home() {
     <div className="flex h-screen w-full flex-col overflow-hidden text-foreground">
       <div className="flex min-h-0 flex-1">
         {/* Left sidebar */}
-        <aside className="flex w-[240px] shrink-0 flex-col border-r border-border">
+        <aside className="flex w-[225px] shrink-0 flex-col border-r border-border">
           <div className="shrink-0 border-b">
             <div className="pl-2 pt-0 flex items-center justify-between pb-1">
               <h1 className="scroll-m-20 max-w-[11rem] text-md font-extrabold leading-tight tracking-tight text-balance">
-                REZE STUDIO
+                REZE STUDIO <span className="text-[11px] ml-0.5 text-muted-foreground font-normal">v0.1.0</span>
               </h1>
               <Button variant="ghost" size="sm" asChild className="hover:bg-black hover:text-white rounded-full">
                 <Link href="https://github.com/AmyangXYZ/reze-studio" target="_blank">
@@ -557,7 +566,8 @@ export default function Home() {
           <div className="flex min-h-0 flex-1 flex-col">
             <div className="min-h-0 flex-1 overflow-hidden">
               <BoneList
-                allBones={allBones}
+                modelBones={sidebarBones}
+                clip={clip}
                 selectedGroup={selectedGroup}
                 activeBone={activeBone}
                 onSelectGroup={handleSelectGroup}
@@ -606,7 +616,7 @@ export default function Home() {
         </div>
 
         {/* Right sidebar — properties for active bone / morph / keyframe context */}
-        <aside className="flex w-[280px] shrink-0 flex-col border-l border-sidebar-border text-sidebar-foreground">
+        <aside className="flex w-[256px] shrink-0 flex-col border-l border-sidebar-border text-sidebar-foreground">
           <div className="flex min-h-9 shrink-0 items-center border-b border-sidebar-border px-3 py-2">
             <span className="text-[11px] font-medium uppercase tracking-widest text-sidebar-foreground/70">
               Properties

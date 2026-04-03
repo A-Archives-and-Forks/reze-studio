@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useRef, useEffect, useCallback, useMemo } from "react"
+import { useState, useRef, useEffect, useCallback, useMemo, memo } from "react"
 import {
   ChevronLeft,
   ChevronRight,
@@ -899,7 +899,7 @@ interface TimelineProps {
   setSelectedKeyframes: (kfs: SelectedKeyframe[] | ((prev: SelectedKeyframe[]) => SelectedKeyframe[])) => void
 }
 
-export function Timeline({
+export const Timeline = memo(function Timeline({
   clip,
   currentFrame,
   setCurrentFrame,
@@ -912,6 +912,8 @@ export function Timeline({
 }: TimelineProps) {
   const fc = clip?.frameCount ?? 0
   const [pxPerFrame, setPxPerFrame] = useState(4)
+  const pxRef = useRef(pxPerFrame)
+  pxRef.current = pxPerFrame
   const [scrollX, setScrollX] = useState(0)
   const scrollXRef = useRef(0)
   scrollXRef.current = scrollX
@@ -935,37 +937,56 @@ export function Timeline({
     setPxPerFrame((p) => Math.min(MAX_PX, Math.max(minPxPerFrame, p)))
   }, [minPxPerFrame])
 
+  // Clamp scroll when viewport or clip size changes (NOT on pxPerFrame — zoom handles its own scroll)
   useEffect(() => {
     if (trackWidth <= 0) return
-    const maxScroll = Math.max(0, LABEL_W + fc * pxPerFrame - trackWidth)
+    const maxScroll = Math.max(0, LABEL_W + fc * pxRef.current - trackWidth)
     setScrollX((s) => Math.min(maxScroll, Math.max(0, s)))
-  }, [trackWidth, fc, pxPerFrame])
+  }, [trackWidth, fc])
 
   // ── Auto-scroll: page-turn when playhead leaves the visible window ──
   useEffect(() => {
     if (trackWidth <= 0) return
     const viewable = trackWidth - LABEL_W
     if (viewable <= 0) return
-    const playheadX = currentFrame * pxPerFrame
-    const maxScroll = Math.max(0, LABEL_W + fc * pxPerFrame - trackWidth)
+    const px = pxRef.current
+    const playheadX = currentFrame * px
+    const maxScroll = Math.max(0, LABEL_W + fc * px - trackWidth)
     const visLeft = scrollXRef.current
     const visRight = scrollXRef.current + viewable
 
     if (playheadX >= visLeft && playheadX <= visRight) return
 
-    // Page-turn: place playhead near the left edge of the new page
     const target = Math.max(0, Math.min(maxScroll, playheadX - viewable * 0.1))
     setScrollX(target)
-  }, [currentFrame, pxPerFrame, trackWidth, fc])
+  }, [currentFrame, trackWidth, fc])
+
+  // Zoom anchored on the playhead: adjust scrollX so the playhead stays at the
+  // same screen-relative position before and after the pxPerFrame change.
+  const zoomTo = useCallback(
+    (newPx: number) => {
+      const clamped = Math.max(minPxPerFrame, Math.min(MAX_PX, newPx))
+      const oldPx = pxRef.current
+      if (clamped === oldPx) return
+      const viewable = trackWidth - LABEL_W
+      if (viewable > 0) {
+        const playheadScreen = currentFrame * oldPx - scrollXRef.current
+        const newScroll = currentFrame * clamped - playheadScreen
+        const maxScroll = Math.max(0, LABEL_W + fc * clamped - trackWidth)
+        setScrollX(Math.max(0, Math.min(maxScroll, newScroll)))
+      }
+      setPxPerFrame(clamped)
+    },
+    [minPxPerFrame, trackWidth, currentFrame, fc],
+  )
 
   const onWheel = useCallback(
     (e: React.WheelEvent) => {
       e.preventDefault()
-      if (e.ctrlKey || e.metaKey)
-        setPxPerFrame((p) => Math.max(minPxPerFrame, Math.min(MAX_PX, p - e.deltaY * 0.02)))
+      if (e.ctrlKey || e.metaKey) zoomTo(pxRef.current - e.deltaY * 0.02)
       else setScrollX((p) => Math.max(0, p + e.deltaX + e.deltaY))
     },
-    [minPxPerFrame],
+    [zoomTo],
   )
 
   const onSelectKeyframe = useCallback(
@@ -1073,15 +1094,14 @@ export function Timeline({
           className={cn(
             "flex size-5 shrink-0 items-center justify-center overflow-hidden p-0",
             "focus-visible:outline-none focus-visible:ring-0",
-            playing && "bg-[#d83838] text-[#0f0f12] hover:bg-[#d83838]/90",
-            !playing && "hover:bg-secondary/90",
+            "bg-transparent"
           )}
           onClick={() => setPlaying((p) => !p)}
         >
           {playing ? (
-            <Pause className="size-3.5" strokeWidth={1.5} />
+            <Pause className="size-3.5 fill-current" strokeWidth={1.5} />
           ) : (
-            <Play className="size-3.5 fill-current" strokeWidth={1.75} />
+            <Play className="size-3.5 fill-current" strokeWidth={1.5} />
           )}
         </Button>
         {(
@@ -1123,7 +1143,7 @@ export function Timeline({
           }}
         />
         <div className="mx-0.5 whitespace-nowrap rounded-md border border-border/50 bg-card px-1.5 py-px font-mono text-[9px] tabular-nums text-muted-foreground">
-          F{String(Math.round(currentFrame)).padStart(4, "0")} / {fc}
+          F{String(Math.round(currentFrame)).padStart(4, "0")} / {fc.toString().padStart(4, "0")}
         </div>
         <div className="mx-0.5 h-3.5 w-px shrink-0 bg-border" />
         {/* Channel tabs */}
@@ -1161,7 +1181,7 @@ export function Timeline({
           )
         })}
         <div className="min-w-0 flex-1" />
-        <ZoomRuler min={minPxPerFrame} max={MAX_PX} value={pxPerFrame} onChange={setPxPerFrame} />
+        <ZoomRuler min={minPxPerFrame} max={MAX_PX} value={pxPerFrame} onChange={zoomTo} />
       </div>
       {/* Canvas */}
       <div ref={timelineAreaRef} style={{ flex: 1, minHeight: 0 }} onWheel={onWheel}>
@@ -1201,4 +1221,4 @@ export function Timeline({
       </div>
     </div>
   )
-}
+})

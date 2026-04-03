@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useRef, useState } from "react"
+import { memo, useCallback, useEffect, useRef, useState } from "react"
 import { cn } from "@/lib/utils"
 
 const SIZE = 160
@@ -68,7 +68,7 @@ type InterpolationCurveEditorProps = {
 }
 
 /** VMD-style cubic Bézier editor in 127×127 space (same as reference HTML). */
-export function InterpolationCurveEditor({ p1, p2, disabled, onChange }: InterpolationCurveEditorProps) {
+export const InterpolationCurveEditor = memo(function InterpolationCurveEditor({ p1, p2, disabled, onChange }: InterpolationCurveEditorProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const dragging = useRef<"p1" | "p2" | null>(null)
   const [dpr, setDpr] = useState(1)
@@ -293,4 +293,4 @@ export function InterpolationCurveEditor({ p1, p2, disabled, onChange }: Interpo
       />
     </div>
   )
-}
+})

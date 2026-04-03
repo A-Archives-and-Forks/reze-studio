@@ -1,7 +1,7 @@
 "use client"
 
 import * as SliderPrimitive from "@radix-ui/react-slider"
-import { useMemo } from "react"
+import { memo, useMemo } from "react"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
 
@@ -21,7 +21,7 @@ function clamp(n: number, lo: number, hi: number) {
 }
 
 /** Center-zero axis value: Radix Slider + theme track/input; fill + thumb use engine axis color. */
-export function AxisSliderRow({
+export const AxisSliderRow = memo(function AxisSliderRow({
   axis,
   color,
   value,
@@ -81,4 +81,4 @@ export function AxisSliderRow({
       />
     </div>
   )
-}
+})
