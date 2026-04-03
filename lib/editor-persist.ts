@@ -23,16 +23,11 @@ const DEFAULTS: PersistedEditorMeta = {
   hasClip: false,
 }
 
-export function saveMeta(meta: Partial<PersistedEditorMeta>): void {
-  try {
-    const prev = loadMeta()
-    localStorage.setItem(LS_KEY, JSON.stringify({ ...prev, ...meta }))
-  } catch {
-    /* quota or private browsing — ignore */
-  }
-}
+/** In-memory mirror of persisted meta — avoids read+parse+write on every tick when nothing changed. */
+let metaCache: PersistedEditorMeta | null = null
+let lastMetaJson: string | null = null
 
-export function loadMeta(): PersistedEditorMeta {
+function readMetaFromStorage(): PersistedEditorMeta {
   try {
     const raw = localStorage.getItem(LS_KEY)
     if (!raw) return { ...DEFAULTS }
@@ -40,6 +35,27 @@ export function loadMeta(): PersistedEditorMeta {
   } catch {
     return { ...DEFAULTS }
   }
+}
+
+export function saveMeta(meta: Partial<PersistedEditorMeta>): void {
+  try {
+    const prev = metaCache ?? readMetaFromStorage()
+    const next = { ...prev, ...meta }
+    const json = JSON.stringify(next)
+    if (json === lastMetaJson) return
+    localStorage.setItem(LS_KEY, json)
+    metaCache = next
+    lastMetaJson = json
+  } catch {
+    /* quota or private browsing — ignore */
+  }
+}
+
+export function loadMeta(): PersistedEditorMeta {
+  const m = readMetaFromStorage()
+  metaCache = m
+  lastMetaJson = JSON.stringify(m)
+  return { ...m }
 }
 
 export async function saveClip(vmd: ArrayBuffer): Promise<void> {
