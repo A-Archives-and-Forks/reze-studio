@@ -51,8 +51,17 @@ function createPlaybackStore(): PlaybackStore {
 
   const set = (next: PlaybackState) => {
     if (next === state) return
+    // Only mirror `currentFrame` into the ref when it actually changed in
+    // this transition. During playback, <EngineBridge>'s rAF loop writes the
+    // live frame straight into `currentFrameRef.current` without going
+    // through `set()` (to avoid 60Hz notifies) — if we unconditionally wrote
+    // `next.currentFrame` here, an unrelated `setPlaying(false)` would
+    // clobber the rAF-written ref with the stale pre-playback frame, and a
+    // subsequent play would resume from that stale position.
+    if (next.currentFrame !== state.currentFrame) {
+      currentFrameRef.current = next.currentFrame
+    }
     state = next
-    currentFrameRef.current = next.currentFrame
     listeners.forEach((l) => l())
   }
 
