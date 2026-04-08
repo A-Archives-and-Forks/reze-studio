@@ -1,7 +1,7 @@
 "use client"
 
 import type { RefObject } from "react"
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { memo, useCallback, useEffect, useRef, useState } from "react"
 import type { AnimationClip, BoneInterpolation, BoneKeyframe, Model } from "reze-engine"
 import { Quat, Vec3 } from "reze-engine"
 import { Button } from "@/components/ui/button"
@@ -662,13 +662,14 @@ function InterpolationSection({
   const kfSample = clip && selectedBone ? sampleBoneKeyframe(clip, selectedBone, currentFrame) : null
   const canEditIp = !!(clip && selectedBone && kfSample)
 
-  const ipPair = useMemo(() => {
-    if (kfSample) {
-      const p = interpolationPairFromTab(kfSample, ipTab)
-      if (p) return p
-    }
-    return interpolationTemplateForChannel(ipTab)
-  }, [kfSample, ipTab])
+  // No useMemo: `patchKeyframeAt` mutates the keyframe in place and returns a
+  // shallow-cloned clip, so `kfSample` keeps its identity across edits. Memo
+  // keyed on `kfSample` would then short-circuit and feed stale numbers back
+  // to the curve editor (dragging one control point would "reset" the other,
+  // and presets wouldn't redraw). Building a fresh pair every render is cheap
+  // and guarantees the editor sees the live interpolation values.
+  const ipPair =
+    (kfSample && interpolationPairFromTab(kfSample, ipTab)) ?? interpolationTemplateForChannel(ipTab)
 
   const applyInterpolation = useCallback(
     (p1: CurvePoint, p2: CurvePoint) => {
