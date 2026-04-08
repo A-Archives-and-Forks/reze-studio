@@ -21,7 +21,7 @@ import {
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
-import { useStudio, type SelectedKeyframe } from "@/context/studio-context"
+import { useStudioActions, useStudioSelector, type SelectedKeyframe } from "@/context/studio-context"
 import { usePlayback } from "@/context/playback-context"
 import type { AnimationClip, BoneKeyframe, MorphKeyframe } from "reze-engine"
 import {
@@ -1192,14 +1192,11 @@ export function Timeline({
   setTab,
   playheadDrawRef,
 }: TimelineProps) {
-  const {
-    clip,
-    commit,
-    selectedBone,
-    selectedMorph,
-    selectedKeyframes,
-    setSelectedKeyframes,
-  } = useStudio()
+  const clip = useStudioSelector((s) => s.clip)
+  const selectedBone = useStudioSelector((s) => s.selectedBone)
+  const selectedMorph = useStudioSelector((s) => s.selectedMorph)
+  const selectedKeyframes = useStudioSelector((s) => s.selectedKeyframes)
+  const { commit, setSelectedKeyframes } = useStudioActions()
   const { currentFrame, setCurrentFrame, playing, setPlaying } = usePlayback()
   const fc = clip?.frameCount ?? 0
   const [endDraft, setEndDraft] = useState<string | null>(null)

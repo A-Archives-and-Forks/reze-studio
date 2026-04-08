@@ -22,7 +22,7 @@ import {
   upsertMorphKeyframeAtFrame,
   VMD_LINEAR_DEFAULT_IP,
 } from "@/lib/utils"
-import { useStudio } from "@/context/studio-context"
+import { useStudioActions, useStudioSelector } from "@/context/studio-context"
 import { usePlayback, usePlaybackFrameRef } from "@/context/playback-context"
 
 /** Must match `loadClip` name in app/page (engine clip vs React state). */
@@ -158,7 +158,11 @@ export const PropertiesInspector = memo(function PropertiesInspector({
   setTimelineTab,
   clipVersion,
 }: PropertiesInspectorProps) {
-  const { clip, commit, selectedBone, selectedMorph, selectedKeyframes } = useStudio()
+  const clip = useStudioSelector((s) => s.clip)
+  const selectedBone = useStudioSelector((s) => s.selectedBone)
+  const selectedMorph = useStudioSelector((s) => s.selectedMorph)
+  const selectedKeyframes = useStudioSelector((s) => s.selectedKeyframes)
+  const { commit } = useStudioActions()
   /** Read-only ref to the playhead. Subscribing here would re-render Properties
    *  every rAF tick during playback; instead we read .current inside callbacks
    *  and let the small <PlayheadFrameLabel/> + <InterpolationSection/> children
@@ -388,7 +392,7 @@ function InterpolationSection({
 }: {
   clip: AnimationClip | null
   selectedBone: string | null
-  commit: ReturnType<typeof useStudio>["commit"]
+  commit: ReturnType<typeof useStudioActions>["commit"]
   clipVersion: number
 }) {
   const { currentFrame } = usePlayback()
