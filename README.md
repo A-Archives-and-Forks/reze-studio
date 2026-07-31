@@ -4,6 +4,8 @@ A browser-native, WebGPU-powered animation curve editor for MMD, built on [reze-
 
 **Live:** [reze.studio](https://reze.studio)
 
+Edit the motion here, then take the `.vmd` to **[Reze Design](https://reze.design)** to light it, shade it, and render a video or publish it as a live 3D link. Same engine, same files, no conversion between them.
+
 ![Screenshot](./screenshot.png)
 
 A modern, web-native take on MMD animation editing — a dedicated timeline and curve editor for hand-keying `.vmd` clips, freed from the Windows-only desktop install. It isn't a full MMD replacement (no MME-style shaders or video export yet) and it isn't trying to be Maya or Blender; it's a focused, cross-platform tool built to do the animation-editing job exceptionally well. Rendering runs directly on the GPU via WebGPU through [reze-engine](https://github.com/AmyangXYZ/reze-engine) delivering high-frame-rate playback and fluid interaction on anything from an iPad to a gaming laptop.

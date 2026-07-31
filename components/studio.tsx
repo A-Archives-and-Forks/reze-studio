@@ -86,9 +86,22 @@ function clipRetainedForModel(
   let inferred = 0
   for (const t of boneTracks.values()) for (const k of t) inferred = Math.max(inferred, k.frame)
   for (const t of morphTracks.values()) for (const k of t) inferred = Math.max(inferred, k.frame)
+  // IK state rides along, filtered the same way: a chain whose IK bone the new
+  // model does not have is as meaningless as a track for a bone it lacks.
+  // Rebuilding a clip field by field is how this data gets lost — a motion that
+  // switches leg IK off would silently start driving the legs again after a
+  // model swap, and export without the instruction it arrived with.
+  let ikTracks: AnimationClip["ikTracks"]
+  if (clip.ikTracks?.size) {
+    ikTracks = new Map()
+    for (const [name, track] of clip.ikTracks) {
+      if (boneNames.has(name) && track?.length) ikTracks.set(name, track.map((k) => ({ ...k })))
+    }
+    if (ikTracks.size === 0) ikTracks = undefined
+  }
   const empty = boneTracks.size === 0 && morphTracks.size === 0
   const end = empty ? Math.max(clip.frameCount, DEFAULT_STUDIO_CLIP_FRAMES) : Math.max(clip.frameCount, inferred)
-  return { boneTracks, morphTracks, frameCount: end }
+  return { boneTracks, morphTracks, ikTracks, frameCount: end }
 }
 
 function downloadBlob(blob: Blob, filename: string) {
@@ -271,6 +284,14 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
                   <MenubarItem className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground" asChild>
                     <Link href={docsReadmeUrl} target="_blank" rel="noreferrer">
                       Tutorial (README)
+                    </Link>
+                  </MenubarItem>
+                  <MenubarSeparator className="my-0.5" />
+                  {/* Where an edited clip goes next: Studio makes the motion,
+                      Design makes the picture. */}
+                  <MenubarItem className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground" asChild>
+                    <Link href="https://reze.design" target="_blank" rel="noreferrer">
+                      Render a scene — Reze Design
                     </Link>
                   </MenubarItem>
                   <MenubarItem className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground" disabled>

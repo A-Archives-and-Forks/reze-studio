@@ -9,7 +9,26 @@
       "Bash(npm run *)",
       "WebSearch",
       "Bash(npm view *)",
-      "Bash(npm outdated *)"
+      "Bash(npm outdated *)",
+      "Bash(python3 -c \"import json,sys; t=json.load\\(sys.stdin\\); items=[\\(k,v\\) for k,v in t.items\\(\\) if k not in \\('created','modified'\\)]; [print\\(k,v[:10]\\) for k,v in items[-15:]]\")",
+      "Bash(node -p \"require\\('./node_modules/reze-engine/package.json'\\).version\")",
+      "Bash(xargs git log -1 --oneline)",
+      "Bash(git stash *)",
+      "Bash(git switch *)",
+      "Bash(git rebase *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(echo \"=== tsc exit: $? ===\")",
+      "Bash(git push *)",
+      "Bash(git fetch *)",
+      "Bash(git ls-tree *)",
+      "Bash(git pull *)",
+      "Bash(git cherry-pick *)",
+      "Bash(git checkout *)",
+      "Bash(npm install *)",
+      "Bash(echo \"tsc exit: $?\")",
+      "Bash(GIT_EDITOR=true git cherry-pick --continue)",
+      "Bash(npm i *)"
     ]
   }
 }
