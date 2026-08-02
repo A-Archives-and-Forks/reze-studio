@@ -24,6 +24,7 @@ import { cn } from "@/lib/utils"
 import { useStudioActions, useStudioSelector, type SelectedKeyframe } from "@/context/studio-context"
 import { usePlayback } from "@/context/playback-context"
 import type { AnimationClip, BoneKeyframe, MorphKeyframe } from "reze-engine"
+import { bezierInterpolate } from "reze-engine"
 import {
   type Channel,
   ROT_CHANNELS,
@@ -48,22 +49,9 @@ function minPxPerFrameForViewport(trackWidthPx: number, frameCount: number): num
   return Math.max(MIN_PX, Math.min(fit, MAX_PX))
 }
 
+// 127-space wrapper over the engine's VMD bezier evaluator.
 function bezierY(cp0: { x: number; y: number }, cp1: { x: number; y: number }, t: number) {
-  const x1 = cp0.x / 127,
-    y1 = cp0.y / 127,
-    x2 = cp1.x / 127,
-    y2 = cp1.y / 127
-  let lo = 0,
-    hi = 1,
-    mid = 0.5
-  for (let i = 0; i < 15; i++) {
-    const x = 3 * (1 - mid) ** 2 * mid * x1 + 3 * (1 - mid) * mid ** 2 * x2 + mid ** 3
-    if (Math.abs(x - t) < 0.0001) break
-    if (x < t) lo = mid
-    else hi = mid
-    mid = (lo + hi) / 2
-  }
-  return 3 * (1 - mid) ** 2 * mid * y1 + 3 * (1 - mid) * mid ** 2 * y2 + mid ** 3
+  return bezierInterpolate(cp0.x / 127, cp1.x / 127, cp0.y / 127, cp1.y / 127, t)
 }
 
 const C = {

@@ -1,7 +1,7 @@
 import { clsx, type ClassValue } from "clsx"
 import { twMerge } from "tailwind-merge"
 import type { AnimationClip, BoneInterpolation, BoneKeyframe, ControlPoint, MorphKeyframe, Model } from "reze-engine"
-import { Quat, Vec3 } from "reze-engine"
+import { Quat, Vec3, interpolateControlPoints } from "reze-engine"
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
@@ -190,29 +190,6 @@ export function cloneAnimationClip(clip: AnimationClip): AnimationClip {
 export const SIMPLIFY_ROT_DEG = 0.5 // visible-but-tiny rotation drift
 export const SIMPLIFY_TRANS = 0.01 // MMD units (~3mm at character scale)
 
-const INV_127 = 1 / 127
-
-// Same bezier-at-t evaluator reze-engine uses internally; duplicated because
-// the engine does not export interpolateControlPoints.
-function bezierY(cp: ControlPoint[], t: number): number {
-  const x1 = cp[0].x * INV_127
-  const x2 = cp[1].x * INV_127
-  const y1 = cp[0].y * INV_127
-  const y2 = cp[1].y * INV_127
-  const tt = Math.max(0, Math.min(1, t))
-  let lo = 0
-  let hi = 1
-  let mid = 0.5
-  for (let i = 0; i < 15; i++) {
-    const x = 3 * (1 - mid) * (1 - mid) * mid * x1 + 3 * (1 - mid) * mid * mid * x2 + mid * mid * mid
-    if (Math.abs(x - tt) < 1e-4) break
-    if (x < tt) lo = mid
-    else hi = mid
-    mid = (lo + hi) / 2
-  }
-  return 3 * (1 - mid) * (1 - mid) * mid * y1 + 3 * (1 - mid) * mid * mid * y2 + mid * mid * mid
-}
-
 // Evaluate a sorted bone track at integer frame `f`. VMD convention: the
 // interpolation stored on keyframe B shapes the segment A→B.
 function evalBoneTrackAt(track: BoneKeyframe[], f: number): { rotation: Quat; translation: Vec3 } {
@@ -231,11 +208,11 @@ function evalBoneTrackAt(track: BoneKeyframe[], f: number): { rotation: Quat; tr
   const b = track[i]
   const span = b.frame - a.frame
   const g = span > 0 ? (f - a.frame) / span : 0
-  const rotT = bezierY(b.interpolation.rotation, g)
+  const rotT = interpolateControlPoints(b.interpolation.rotation, g)
   const rotation = Quat.slerp(a.rotation, b.rotation, rotT)
-  const txT = bezierY(b.interpolation.translationX, g)
-  const tyT = bezierY(b.interpolation.translationY, g)
-  const tzT = bezierY(b.interpolation.translationZ, g)
+  const txT = interpolateControlPoints(b.interpolation.translationX, g)
+  const tyT = interpolateControlPoints(b.interpolation.translationY, g)
+  const tzT = interpolateControlPoints(b.interpolation.translationZ, g)
   return {
     rotation,
     translation: new Vec3(
@@ -246,11 +223,9 @@ function evalBoneTrackAt(track: BoneKeyframe[], f: number): { rotation: Quat; tr
   }
 }
 
-// Angle between two unit quats in degrees. Uses |dot| to ignore double-cover.
+// Angle between two unit quats in degrees. Double-cover-insensitive.
 function quatAngleDegrees(a: Quat, b: Quat): number {
-  const d = Math.abs(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w)
-  const clamped = d > 1 ? 1 : d
-  return 2 * Math.acos(clamped) * (180 / Math.PI)
+  return Quat.angleTo(a, b) * (180 / Math.PI)
 }
 
 // Coarse pass over the 4D handle space, then a tight local refinement
@@ -338,7 +313,7 @@ function fitRotationBezier(
     let maxErr = 0
     for (let f = fA; f <= fC; f++) {
       const u = (f - fA) / span
-      const t = bezierY(cp, u)
+      const t = interpolateControlPoints(cp, u)
       const q = Quat.slerp(kA.rotation, kC.rotation, t)
       const err = quatAngleDegrees(q, originalRot[f - f0])
       if (err > maxErr) maxErr = err
@@ -372,7 +347,7 @@ function fitAxisBezier(
     let maxErr = 0
     for (let f = fA; f <= fC; f++) {
       const u = (f - fA) / span
-      const t = bezierY(cp, u)
+      const t = interpolateControlPoints(cp, u)
       const val = startVal + range * t
       const err = Math.abs(val - get(f))
       if (err > maxErr) maxErr = err
@@ -440,12 +415,12 @@ function fitBezierSegment(
   const epsTrInv = 1 / Math.max(epsTrans, 1e-6)
   for (let f = fA; f <= fC; f++) {
     const u = span > 0 ? (f - fA) / span : 0
-    const rotT = rotTotalDeg < 1e-4 ? u : bezierY(rotCP, u)
+    const rotT = rotTotalDeg < 1e-4 ? u : interpolateControlPoints(rotCP, u)
     const q = Quat.slerp(kA.rotation, kC.rotation, rotT)
     const rErr = quatAngleDegrees(q, originalRot[f - f0])
-    const txT = Math.abs(rangeX) < 1e-4 ? u : bezierY(txCP, u)
-    const tyT = Math.abs(rangeY) < 1e-4 ? u : bezierY(tyCP, u)
-    const tzT = Math.abs(rangeZ) < 1e-4 ? u : bezierY(tzCP, u)
+    const txT = Math.abs(rangeX) < 1e-4 ? u : interpolateControlPoints(txCP, u)
+    const tyT = Math.abs(rangeY) < 1e-4 ? u : interpolateControlPoints(tyCP, u)
+    const tzT = Math.abs(rangeZ) < 1e-4 ? u : interpolateControlPoints(tzCP, u)
     const ot = originalTr[f - f0]
     const tErr = Math.max(
       Math.abs(kA.translation.x + rangeX * txT - ot.x),

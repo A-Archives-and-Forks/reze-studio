@@ -1,6 +1,7 @@
 "use client"
 
 import { memo, useCallback, useEffect, useRef, useState } from "react"
+import { easeInOut } from "reze-engine"
 import { cn } from "@/lib/utils"
 
 const SIZE = 160
@@ -72,10 +73,8 @@ type InterpolationCurveEditorProps = {
  *  to read as motion rather than a jump. */
 const ANIM_MS = 220
 
-/** easeInOutQuad — standard smooth ease for UI transitions. */
-function ease(u: number) {
-  return u < 0.5 ? 2 * u * u : 1 - Math.pow(-2 * u + 2, 2) / 2
-}
+/** easeInOutQuad — standard smooth ease for UI transitions (engine's easeInOut). */
+const ease = easeInOut
 
 /** VMD-style cubic Bézier editor in 127×127 space (same as reference HTML). */
 export const InterpolationCurveEditor = memo(function InterpolationCurveEditor({ p1, p2, disabled, onChange }: InterpolationCurveEditorProps) {

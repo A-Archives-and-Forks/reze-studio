@@ -4,42 +4,17 @@ import type { AnimationClip, BoneKeyframe, MorphKeyframe } from "reze-engine"
 export { Vec3, Quat }
 export type { AnimationClip, BoneKeyframe, MorphKeyframe }
 
+const DEG = 180 / Math.PI
+const RAD = Math.PI / 180
+
 // Quat → Euler YXZ (degrees) — matches MMD convention
 export function quatToEuler(q: Quat) {
-  const sinX = 2 * (q.w * q.x - q.y * q.z)
-  const clamped = Math.max(-1, Math.min(1, sinX))
-  const x = Math.asin(clamped)
-  const cosX = Math.cos(x)
-  let y: number, z: number
-  if (Math.abs(cosX) > 0.0001) {
-    y = Math.atan2(2 * (q.w * q.y + q.x * q.z), 1 - 2 * (q.x * q.x + q.y * q.y))
-    z = Math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.x * q.x + q.z * q.z))
-  } else {
-    y = Math.atan2(-2 * (q.x * q.z - q.w * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
-    z = 0
-  }
-  const DEG = 180 / Math.PI
-  return { x: x * DEG, y: y * DEG, z: z * DEG }
+  const e = Quat.toEulerOrder(q, "YXZ")
+  return { x: e.x * DEG, y: e.y * DEG, z: e.z * DEG }
 }
 
 export function eulerToQuat(ex: number, ey: number, ez: number): Quat {
-  const RAD = Math.PI / 180
-  const hx = ex * RAD * 0.5,
-    hy = ey * RAD * 0.5,
-    hz = ez * RAD * 0.5
-  const cx = Math.cos(hx),
-    sx = Math.sin(hx)
-  const cy = Math.cos(hy),
-    sy = Math.sin(hy)
-  const cz = Math.cos(hz),
-    sz = Math.sin(hz)
-  // YXZ order
-  return new Quat(
-    cy * sx * cz + sy * cx * sz,
-    sy * cx * cz - cy * sx * sz,
-    cy * cx * sz - sy * sx * cz,
-    cy * cx * cz + sy * sx * sz,
-  )
+  return Quat.fromEuler(ex * RAD, ey * RAD, ez * RAD)
 }
 
 // ─── Bone groups ─────────────────────────────────────────────────────────
