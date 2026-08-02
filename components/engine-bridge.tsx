@@ -30,6 +30,12 @@ export const VMD_PATH = "/animations/miku.vmd"
 export const STUDIO_ANIM_NAME = "studio"
 export const BUNDLED_PMX_FILENAME = MODEL_PATH.replace(/^.*\//, "") || "model.pmx"
 
+// Whether this build ships the demo model and motion (absent = on). Set
+// NEXT_PUBLIC_USE_DEFAULT_ASSETS=false to boot empty; parsed leniently, same
+// convention as reze-design. Read at build time (NEXT_PUBLIC_ inlines it).
+const NO = ["false", "0", "off", "no"]
+const USE_DEFAULT_ASSETS = !NO.includes((process.env.NEXT_PUBLIC_USE_DEFAULT_ASSETS ?? "").trim().toLowerCase())
+
 // ─── Filename helpers — used by EngineBridge (initial VMD load) and by
 //     StudioPage (file menu / export). Kept here so both can import without
 //     a circular dependency. ──────────────────────────────────────────────
@@ -301,7 +307,7 @@ export function EngineBridge({
         await engine.init()
         if (disposed) return
 
-        try {
+        if (USE_DEFAULT_ASSETS) try {
           const model = await engine.loadModel("reze", MODEL_PATH)
           if (disposed) return
           modelRef.current = model
@@ -324,10 +330,10 @@ export function EngineBridge({
           await engine.autoStyleGroups("reze", autoClassifyMaterials(materialNames))
           if (disposed) return
 
-          engine.addGround({ diffuseColor: new Vec3(0.05, 0.04, 0.06) })
         } catch {
           setEngineError(`Add model at public${MODEL_PATH}`)
         }
+        engine.addGround({ diffuseColor: new Vec3(0.05, 0.04, 0.06) })
 
         lastFpsRef.current = null
         engine.runRenderLoop(() => {
