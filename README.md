@@ -14,7 +14,7 @@ One piece of the **Reze MMD family**, covering the whole MMD workflow on the web
 | [reze-design](https://github.com/AmyangXYZ/reze-design)   | Scene design, rendering and sharing platform                                   |
 | **reze-studio**                                           | This repo — animation editing on a professional timeline and curve editor      |
 | [MiKaPo](https://github.com/AmyangXYZ/MiKaPo)             | Real-time motion capture in the browser, exporting straight to VMD             |
-| [reze-rig](https://github.com/AmyangXYZ/reze-rig)         | Universal animation retargeting — FBX and Elden Ring HKX in, VMD out           |
+| [reze-rig](https://github.com/AmyangXYZ/reze-rig)         | Retarget FBX animations to VMD — Mixamo and Unity exports tested           |
 
 ![Screenshot](./screenshot.png)
 
