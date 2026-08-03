@@ -307,9 +307,23 @@ export function EngineBridge({
         await engine.init()
         if (disposed) return
 
+        // Stage first: ground up and the render loop painting before any model
+        // bytes arrive — the model streams in and reveals styled below.
+        engine.addGround({ diffuseColor: new Vec3(0.05, 0.04, 0.06) })
+        lastFpsRef.current = null
+        engine.runRenderLoop(() => {
+          const fps = engine.getStats().fps
+          if (fps === lastFpsRef.current) return
+          lastFpsRef.current = fps
+          setStatusFps(fps > 0 ? fps : null)
+        })
+
         if (USE_DEFAULT_ASSETS) try {
           const model = await engine.loadModel("reze", MODEL_PATH)
           if (disposed) return
+          // Hidden until the NPR graphs are compiled: the first VISIBLE frame
+          // wears the studio look, never the neutral default.
+          engine.setModelTransform("reze", { visible: false })
           modelRef.current = model
           const sk = model.getSkeleton().bones.map((b) => b.name)
           setPmxBoneNames(new Set(sk))
@@ -329,19 +343,11 @@ export function EngineBridge({
           // graphs are installed before we render.
           await engine.autoStyleGroups("reze", autoClassifyMaterials(materialNames))
           if (disposed) return
+          engine.setModelTransform("reze", { visible: true })
 
         } catch {
           setEngineError(`Add model at public${MODEL_PATH}`)
         }
-        engine.addGround({ diffuseColor: new Vec3(0.05, 0.04, 0.06) })
-
-        lastFpsRef.current = null
-        engine.runRenderLoop(() => {
-          const fps = engine.getStats().fps
-          if (fps === lastFpsRef.current) return
-          lastFpsRef.current = fps
-          setStatusFps(fps > 0 ? fps : null)
-        })
 
         try {
           await modelRef.current?.loadVmd(STUDIO_ANIM_NAME, VMD_PATH)
