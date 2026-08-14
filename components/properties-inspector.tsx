@@ -456,14 +456,30 @@ export const PropertiesInspector = memo(function PropertiesInspector({
     (w: number, mode: "preview" | "commit") => {
       if (!selectedMorph || !clip) return
       const frame = Math.round(Math.max(0, Math.min(clip.frameCount, playbackFrameRef.current)))
-      const track = clip.morphTracks.get(selectedMorph) ?? []
-      if (!clip.morphTracks.has(selectedMorph)) clip.morphTracks.set(selectedMorph, track)
-      const existing = track.find((k) => k.frame === frame)
-      if (existing) {
-        existing.weight = w
+      // Installing a MISSING track has to go through commit, not through the
+      // live clip's Map. Adding it here mutated the object the store is holding
+      // while `mode === "preview"` deliberately does not commit, so `clip` and
+      // `clipSnapshot` drifted apart — and the next commit then pushed a
+      // snapshot that predated edits already applied, which is undo silently
+      // losing a morph. Adding one expression and then editing another is
+      // exactly the sequence that reaches it.
+      //
+      // Weight edits to an EXISTING keyframe stay in place: that is what makes
+      // slider preview cheap, and the track already belongs to the clip.
+      let track = clip.morphTracks.get(selectedMorph)
+      if (!track) {
+        track = [{ morphName: selectedMorph, frame, weight: w }]
+        const morphTracks = new Map(clip.morphTracks)
+        morphTracks.set(selectedMorph, track)
+        commit({ ...clip, morphTracks })
       } else {
-        track.push({ morphName: selectedMorph, frame, weight: w })
-        track.sort((a, b) => a.frame - b.frame)
+        const existing = track.find((k) => k.frame === frame)
+        if (existing) {
+          existing.weight = w
+        } else {
+          track.push({ morphName: selectedMorph, frame, weight: w })
+          track.sort((a, b) => a.frame - b.frame)
+        }
       }
       const model = modelRef.current
       if (model) {

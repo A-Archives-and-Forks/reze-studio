@@ -883,7 +883,9 @@ function TimelineCanvas({
           ctx.font = `10px ${FONT}`
           ctx.textBaseline = "top"
           ctx.textAlign = "right"
-          const isRotGroup = channels[0].group === "rot"
+          // `?.` like the axis label above: the morph tab has no channels, so
+          // channels[0] is undefined here whenever a bone is also selected.
+          const isRotGroup = channels[0]?.group === "rot"
           const numWidth = isRotGroup ? 7 : 6
           const formatVal = (v: number) => {
             const s = isRotGroup ? `${v.toFixed(1)}°` : v.toFixed(2)
@@ -1448,14 +1450,21 @@ export function Timeline({
     (morph: string, kfRef: MorphKeyframe, toFrame: number, dw: number) => {
       if (!clip) return
       const track = clip.morphTracks.get(morph)
-      if (!track || !track.includes(kfRef)) return
+      if (!track) return
+      // Identity first, then the frame it describes. A ref captured before an
+      // undo points at a keyframe that is still on screen but is no longer the
+      // object in the track — cloneAnimationClip rebuilds every one of them —
+      // and an identity-only test made that keyframe silently undraggable with
+      // nothing on screen to say why.
+      const kf = track.includes(kfRef) ? kfRef : track.find((k) => k.frame === kfRef.frame)
+      if (!kf) return
       const clamped = Math.max(0, toFrame)
-      const fromFrame = kfRef.frame
+      const fromFrame = kf.frame
       if (clamped !== fromFrame) {
-        kfRef.frame = clamped
+        kf.frame = clamped
         track.sort((a, b) => a.frame - b.frame)
       }
-      if (dw) kfRef.weight = Math.max(0, Math.min(1, kfRef.weight + dw))
+      if (dw) kf.weight = Math.max(0, Math.min(1, kf.weight + dw))
       for (const s of selectedKeyframes) {
         if (s.morph === morph && s.frame === fromFrame) (s as { frame: number }).frame = clamped
       }
