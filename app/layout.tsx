@@ -2,6 +2,7 @@ import type { Metadata } from "next"
 import { Geist, Geist_Mono } from "next/font/google"
 import "./globals.css"
 import { Analytics } from "@vercel/analytics/next"
+import { CrashLogCapture } from "@/components/crash-log-capture"
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -27,6 +28,8 @@ export default function RootLayout({
   return (
     <html lang="en" className="dark select-none">
       <body className={`${geistSans.variable} ${geistMono.variable} antialiased outline-none`}>
+        {/* Capture starts here so a crash report carries what led up to it. */}
+        <CrashLogCapture />
         {children}
         <Analytics />
       </body>
