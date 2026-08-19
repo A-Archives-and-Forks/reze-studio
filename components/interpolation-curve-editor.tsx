@@ -339,7 +339,7 @@ export const InterpolationCurveEditor = memo(function InterpolationCurveEditor({
   return (
     <div
       className={cn(
-        "shrink-0 rounded border border-border bg-background p-0.5",
+        "shrink-0 rounded-interior border border-line-strong bg-surface p-0.5",
         disabled && "pointer-events-none opacity-50",
       )}
       style={{ width: SIZE + 4, height: SIZE + 4 }}

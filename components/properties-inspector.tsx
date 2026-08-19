@@ -561,7 +561,7 @@ export const PropertiesInspector = memo(function PropertiesInspector({
         <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Operations</div>
         <div className="space-y-2.5">
           <div className="flex items-center gap-1.5">
-            <span className="w-10 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground/70">Key</span>
+            <span className="w-10 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">Key</span>
             <Button
               type="button"
               variant="secondary"
@@ -584,7 +584,7 @@ export const PropertiesInspector = memo(function PropertiesInspector({
             </Button>
           </div>
           <div className="flex items-center gap-1.5">
-            <span className="w-10 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground/70">Track</span>
+            <span className="w-10 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">Track</span>
             <Button
               type="button"
               variant="secondary"

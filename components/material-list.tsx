@@ -7,6 +7,7 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { MATERIAL_PRESETS, MATERIAL_PRESET_LABEL, presetForMaterial, setMaterialPreset } from "@/lib/materials"
+import { cn } from "@/lib/utils"
 
 interface MaterialListProps {
   materialNames: string[]
@@ -45,7 +46,7 @@ export const MaterialList = memo(function MaterialList({
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex shrink-0 items-center gap-2 border-sidebar-border px-4 py-1.5 text-[10px] font-medium tracking-widest text-muted-foreground">
+      <div className="flex shrink-0 items-center gap-2 border-b border-line px-4 py-1.5 text-[10px] font-medium tracking-widest text-muted-foreground">
         <EyeIcon className="size-3 shrink-0" aria-label="Visible" />
         <span className="min-w-0 flex-1 truncate">Material</span>
         <span className="w-28 shrink-0">Style Group</span>
@@ -65,7 +66,10 @@ export const MaterialList = memo(function MaterialList({
             return (
               <div
                 key={name}
-                className="flex items-center gap-2 px-4"
+                className={cn(
+                  "flex items-center gap-2 rounded-interior px-4 transition-colors",
+                  isSelected ? "bg-blue-400/[0.08]" : "hover:bg-white/[0.03]",
+                )}
               >
                 <Checkbox
                   checked={visible}
@@ -75,13 +79,14 @@ export const MaterialList = memo(function MaterialList({
                 <button
                   type="button"
                   onClick={() => onToggleSelect(name)}
-                  className={`min-w-0 flex-1 truncate text-left font-mono text-[11px] underline-offset-2 hover:underline ${
+                  className={cn(
+                    "min-w-0 flex-1 truncate text-left font-mono text-[11px]",
                     isSelected
-                      ? "text-blue-400 underline"
+                      ? "text-blue-400"
                       : visible
                         ? "text-muted-foreground"
-                        : "text-muted-foreground/40 line-through"
-                  }`}
+                        : "text-muted-foreground line-through",
+                  )}
                   title={name}
                 >
                   {name}

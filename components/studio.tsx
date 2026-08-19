@@ -33,6 +33,8 @@ import { PropertiesInspector } from "@/components/properties-inspector"
 import { Timeline } from "@/components/timeline"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable"
+import { useDefaultLayout } from "react-resizable-panels"
 import { BONE_GROUPS, quatToEuler } from "@/lib/animation"
 import { autoClassifyMaterials, buildStyleGroups, styleGroupsToPresetMap } from "@/lib/materials"
 import type { AnimationClip, MaterialPresetMap } from "reze-engine"
@@ -53,7 +55,7 @@ import {
   simplifyBoneTrack,
   upsertMorphKeyframeAtFrame,
 } from "@/lib/utils"
-import { clearDraft, flushDraftWrite, saveDraftSoon } from "@/lib/draft"
+import { clearDraft, flushDraftWrite, saveDraftSoon, type DraftExtras, type StoredTimelineView } from "@/lib/draft"
 import { clearModelUpload, saveModelUpload } from "@/lib/model-store"
 import packageJson from "../package.json"
 
@@ -145,10 +147,14 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
   appVersion,
 }: StudioLeftPanelProps) {
   const clip = useStudioSelector((s) => s.clip)
+  const { defaultLayout: boneMorphLayout, onLayoutChanged: onBoneMorphLayoutChanged } = useDefaultLayout({
+    id: "reze-studio.left-panel",
+    panelIds: ["bones", "morphs"],
+  })
   const hasClip = clip != null
   return (
-    <aside className="flex w-56 shrink-0 flex-col border-r border-border">
-      <div className="shrink-0 border-b">
+    <aside className="flex w-56 shrink-0 flex-col border-r border-line-strong">
+      <div className="shrink-0 border-b border-line">
         <div className="pl-2 pt-0 flex items-center justify-between pb-1">
           <h1 className="scroll-m-20 max-w-28 text-md font-medium leading-tight tracking-tight text-balance">
             REZE STUDIO
@@ -318,19 +324,27 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
           </Dialog>
         </div>
       </div>
-      <div className="flex min-h-0 flex-1 flex-col">
-        <div className="min-h-0 flex-1 overflow-hidden">
-          <BoneList
-            modelBones={modelBones}
-            clip={clip}
-            selectedGroup={selectedGroup}
-            selectedBone={selectedBone}
-            onSelectGroup={onSelectGroup}
-            onSelectBone={onSelectBone}
-            revealRequest={boneListReveal}
-          />
-        </div>
-        <div className="flex max-h-[196px] shrink-0 flex-col border-t border-border">
+      <ResizablePanelGroup
+        orientation="vertical"
+        defaultLayout={boneMorphLayout}
+        onLayoutChanged={onBoneMorphLayoutChanged}
+        className="min-h-0 flex-1"
+      >
+        <ResizablePanel id="bones" defaultSize="72" minSize="20" className="flex min-h-0 flex-col">
+          <div className="min-h-0 flex-1 overflow-hidden">
+            <BoneList
+              modelBones={modelBones}
+              clip={clip}
+              selectedGroup={selectedGroup}
+              selectedBone={selectedBone}
+              onSelectGroup={onSelectGroup}
+              onSelectBone={onSelectBone}
+              revealRequest={boneListReveal}
+            />
+          </div>
+        </ResizablePanel>
+        <ResizableHandle />
+        <ResizablePanel id="morphs" defaultSize="28" minSize="12" className="flex min-h-0 flex-col">
           <div className="shrink-0 px-3 pb-1 pt-2 text-[11px] font-medium uppercase tracking-widest text-muted-foreground">
             Morphs
           </div>
@@ -342,8 +356,8 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
               onSelectMorph={onSelectMorph}
             />
           </div>
-        </div>
-      </div>
+        </ResizablePanel>
+      </ResizablePanelGroup>
     </aside>
   )
 })
@@ -381,6 +395,18 @@ export function StudioPage() {
   const currentFrameRef = usePlaybackFrameRef()
   /** Model finished loading (file menu + export need a live Model instance). */
   const [studioReady, setStudioReady] = useState(false)
+  /** A restored draft's timeline view (zoom + scroll) — set once by
+   *  EngineBridge's boot restore, handed to <Timeline> as `initialView`. */
+  const [restoredTimelineView, setRestoredTimelineView] = useState<StoredTimelineView | undefined>(undefined)
+  /** Mirrors for use inside stable callbacks (draft persistence) without
+   *  pulling `selectedBone` into their dependency arrays. */
+  const selectedBoneRef = useRef(selectedBone)
+  useEffect(() => {
+    selectedBoneRef.current = selectedBone
+  }, [selectedBone])
+  /** Latest timeline view reported by <Timeline> — read fresh at save time,
+   *  same reasoning as the camera below (no owning state here, just a mirror). */
+  const timelineViewRef = useRef<StoredTimelineView | undefined>(undefined)
 
   const vmdInputRef = useRef<HTMLInputElement>(null)
   const pmxFolderInputRef = useRef<HTMLInputElement>(null)
@@ -479,40 +505,48 @@ export function StudioPage() {
     clipDisplayNameRef.current = clipDisplayName
   }, [clipDisplayName])
 
-  /** Unsaved clip edits — browser `beforeunload` only reads refs (stable listener). */
-  const documentDirtyRef = useRef(false)
-  /** Skip marking dirty for the next `clip` update (loads / reset / export handoff). */
-  const suppressClipDirtyRef = useRef(0)
-
-  useEffect(() => {
-    if (clip == null) return
-    if (suppressClipDirtyRef.current > 0) {
-      suppressClipDirtyRef.current -= 1
-      return
+  // ─── Persist the current draft (clip + editor state) to IndexedDB ────────
+  //     Covers every edit, undo/redo, "New", playhead scrub, and bone
+  //     selection — they all flow through this same state. Debounced inside
+  //     saveDraftSoon; `null` only while the engine hasn't produced a clip
+  //     yet (first mount, before EngineBridge's boot effect settles).
+  //
+  //     The camera has no change event of its own (it's driven by raw mouse
+  //     handlers inside the engine, not React state), so it can't trigger a
+  //     save on its own — it rides along here, read fresh from the engine.
+  //     The timeline's view (zoom + scroll) DOES have a change event
+  //     (<Timeline>'s onViewChange below) and triggers its own save directly;
+  //     it's still included here too so it isn't lost on a save this effect
+  //     triggers for some other reason.
+  const buildDraftExtras = useCallback((): DraftExtras => {
+    const engine = engineRef.current
+    return {
+      currentFrame: currentFrameRef.current,
+      selectedBone: selectedBoneRef.current,
+      camera: engine
+        ? { alpha: engine.getCameraAlpha(), beta: engine.getCameraBeta(), distance: engine.getCameraDistance() }
+        : undefined,
+      timelineView: timelineViewRef.current,
     }
-    documentDirtyRef.current = true
-  }, [clip])
-
-  useEffect(() => {
-    const onBeforeUnload = (e: BeforeUnloadEvent) => {
-      if (!documentDirtyRef.current) return
-      e.preventDefault()
-    }
-    window.addEventListener("beforeunload", onBeforeUnload)
-    return () => window.removeEventListener("beforeunload", onBeforeUnload)
   }, [])
 
-  // ─── Persist the current draft (clip + display name) to localStorage ────
-  //     Covers every edit, undo/redo, and "New" — they all flow through this
-  //     same `clip`/`clipDisplayName` state. Debounced inside saveDraftSoon;
-  //     `null` only while the engine hasn't produced a clip yet (first mount,
-  //     before EngineBridge's boot effect settles).
   useEffect(() => {
     if (clip == null) return
-    saveDraftSoon(clipDisplayName, clip)
-  }, [clip, clipDisplayName])
+    saveDraftSoon(clipDisplayName, clip, buildDraftExtras())
+  }, [clip, clipDisplayName, currentFrame, selectedBone, buildDraftExtras])
 
-  // Debounced writes can lag up to 400ms behind what's on screen — flush on
+  /** <Timeline>'s onViewChange — the only draft field with no other event to
+   *  ride along on, so it schedules its own save directly from refs. */
+  const onTimelineViewChange = useCallback(
+    (view: StoredTimelineView) => {
+      timelineViewRef.current = view
+      if (clipRef.current == null) return
+      saveDraftSoon(clipDisplayNameRef.current, clipRef.current, buildDraftExtras())
+    },
+    [buildDraftExtras],
+  )
+
+  // Debounced writes can lag up to 150ms behind what's on screen — flush on
   // pagehide so closing the tab mid-edit doesn't drop the last keystroke.
   useEffect(() => {
     const onPageHide = () => flushDraftWrite()
@@ -868,7 +902,6 @@ export function StudioPage() {
       setClipVersion((v) => v + 1)
       model.show(STUDIO_ANIM_NAME)
       model.seek(0)
-      if (model.name === "reze") model.setMorphWeight("抗穿模", 0.5)
     },
     [setSelectedKeyframes, setCurrentFrame, setPlaying],
   )
@@ -926,10 +959,7 @@ export function StudioPage() {
       }
 
       model.loadClip(STUDIO_ANIM_NAME, nextClip)
-      suppressClipDirtyRef.current += 1
       replaceClip(nextClip)
-      // Retained motion is still only in memory until export — keep warning if tracks exist.
-      documentDirtyRef.current = hasPrevTimeline
       setClipDisplayName(nextDisplay)
       setCurrentFrame(nextFrame)
       setPlaying(nextPlaying)
@@ -1044,9 +1074,7 @@ export function StudioPage() {
         await model.loadVmd(STUDIO_ANIM_NAME, url)
         const c = model.getClip(STUDIO_ANIM_NAME)
         if (c) {
-          suppressClipDirtyRef.current += 1
           replaceClip(c)
-          documentDirtyRef.current = false
           setClipDisplayName(sanitizeClipFilenameBase(fileStem(file.name)))
           syncStudioAfterNewClip(model)
         }
@@ -1068,7 +1096,6 @@ export function StudioPage() {
       model.loadClip(STUDIO_ANIM_NAME, clip)
       const buf = model.exportVmd(STUDIO_ANIM_NAME)
       downloadBlob(new Blob([buf], { type: "application/octet-stream" }), `${base}-export.vmd`)
-      documentDirtyRef.current = false
     } catch (err) {
       window.alert(err instanceof Error ? err.message : String(err))
     }
@@ -1079,9 +1106,7 @@ export function StudioPage() {
     if (!model) return
     const fresh = emptyStudioClip()
     model.loadClip(STUDIO_ANIM_NAME, fresh)
-    suppressClipDirtyRef.current += 1
     replaceClip(fresh)
-    documentDirtyRef.current = false
     setClipDisplayName("clip")
     setCurrentFrame(0)
     setPlaying(false)
@@ -1103,9 +1128,14 @@ export function StudioPage() {
     if (!window.confirm("Reset to the default model? This clears your uploaded model and current draft."))
       return
     void clearModelUpload()
-    clearDraft()
+    void clearDraft()
     window.location.reload()
   }, [])
+
+  const { defaultLayout: viewportTimelineLayout, onLayoutChanged: onViewportTimelineLayoutChanged } = useDefaultLayout({
+    id: "reze-studio.viewport-timeline",
+    panelIds: ["viewport", "timeline"],
+  })
 
   return (
     <div className="flex h-screen w-full flex-col overflow-hidden text-foreground">
@@ -1117,8 +1147,7 @@ export function StudioPage() {
         revealBoneInListRef={revealBoneInListRef}
         currentFrameRef={currentFrameRef}
         playheadDrawRef={playheadDrawRef}
-        documentDirtyRef={documentDirtyRef}
-        suppressClipDirtyRef={suppressClipDirtyRef}
+        setTimelineView={setRestoredTimelineView}
         setPmxBoneNames={setPmxBoneNames}
         setModelBoneOrder={setModelBoneOrder}
         setMorphNames={setMorphNames}
@@ -1156,23 +1185,45 @@ export function StudioPage() {
           appVersion={APP_VERSION}
         />
 
-        {/* Center: viewport + timeline */}
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-          <StudioViewport ref={canvasRef} engineError={engineError} />
-          {/* Timeline with dopesheet + value graph */}
-          <div className="h-[220px] shrink-0 border-t border-border">
-            <Timeline visibleBones={visibleBones} clipVersion={clipVersion} tab={timelineTab} setTab={setTimelineTab} playheadDrawRef={playheadDrawRef} />
-          </div>
-        </div>
+        {/* Center: viewport + timeline, resizable */}
+        <ResizablePanelGroup
+          orientation="vertical"
+          defaultLayout={viewportTimelineLayout}
+          onLayoutChanged={onViewportTimelineLayoutChanged}
+          className="min-h-0 min-w-0 flex-1"
+        >
+          <ResizablePanel id="viewport" defaultSize="76" minSize={100} className="flex min-h-0 flex-col">
+            <StudioViewport ref={canvasRef} engineError={engineError} />
+          </ResizablePanel>
+          <ResizableHandle className="bg-line-strong" />
+          {/* Timeline with dopesheet + value graph. Gated on studioReady so it
+              mounts once boot has fully resolved — currentFrame and
+              restoredTimelineView are both already final by then, so
+              Timeline's lazy-initialized zoom/scroll state starts correct
+              instead of being patched in after a defaults-first mount. */}
+          <ResizablePanel id="timeline" defaultSize="24" minSize={220} className="flex min-h-0 flex-col">
+            {studioReady && (
+              <Timeline
+                visibleBones={visibleBones}
+                clipVersion={clipVersion}
+                tab={timelineTab}
+                setTab={setTimelineTab}
+                playheadDrawRef={playheadDrawRef}
+                initialView={restoredTimelineView}
+                onViewChange={onTimelineViewChange}
+              />
+            )}
+          </ResizablePanel>
+        </ResizablePanelGroup>
 
         {/* Right sidebar — Properties (selection) + Materials (per-model) tabs */}
-        <aside className="flex w-64 shrink-0 flex-col border-l border-sidebar-border text-sidebar-foreground">
+        <aside className="flex w-64 shrink-0 flex-col border-l border-line-strong text-sidebar-foreground">
           <Tabs
             value={rightPanelTab}
             onValueChange={(v) => setRightPanelTab(v as "properties" | "materials")}
             className="min-h-0 flex-1"
           >
-            <TabsList className="flex min-h-9 w-full shrink-0 items-center gap-4 border-b border-sidebar-border px-3">
+            <TabsList className="flex min-h-9 w-full shrink-0 items-center gap-4 border-b border-line px-3">
               <TabsTrigger value="properties">Properties</TabsTrigger>
               <TabsTrigger value="materials">Materials</TabsTrigger>
             </TabsList>

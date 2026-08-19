@@ -23,7 +23,7 @@ import { usePlayback, usePlaybackFrameRef } from "@/context/playback-context"
 import { useStudioStatusActions } from "@/components/studio-status"
 import { autoClassifyMaterials } from "@/lib/materials"
 import { clipRetainedForModel, emptyStudioClip, interpolationTemplateForFrame, readLocalPoseAfterSeek } from "@/lib/utils"
-import { loadDraft } from "@/lib/draft"
+import { loadDraft, type StoredTimelineView } from "@/lib/draft"
 import { clearModelUpload, loadModelUpload } from "@/lib/model-store"
 
 // ─── Constants shared with StudioPage file handlers ──────────────────────
@@ -66,8 +66,9 @@ interface EngineBridgeProps {
   revealBoneInListRef: RefObject<((bone: string) => void) | null>
   currentFrameRef: RefObject<number>
   playheadDrawRef: RefObject<((frame: number) => void) | null>
-  documentDirtyRef: RefObject<boolean>
-  suppressClipDirtyRef: RefObject<number>
+  /** A restored draft's timeline view (zoom + scroll) — set once, on boot
+   *  restore, so StudioPage can hand it to <Timeline> as its `initialView` prop. */
+  setTimelineView: Dispatch<SetStateAction<StoredTimelineView | undefined>>
   setPmxBoneNames: Dispatch<SetStateAction<ReadonlySet<string>>>
   setModelBoneOrder: Dispatch<SetStateAction<string[]>>
   setMorphNames: Dispatch<SetStateAction<string[]>>
@@ -84,8 +85,7 @@ export function EngineBridge({
   revealBoneInListRef,
   currentFrameRef,
   playheadDrawRef,
-  documentDirtyRef,
-  suppressClipDirtyRef,
+  setTimelineView,
   setPmxBoneNames,
   setModelBoneOrder,
   setMorphNames,
@@ -379,7 +379,6 @@ export function EngineBridge({
           modelRef.current = model
           await installModelIntoUi("reze", model, BUNDLED_PMX_FILENAME)
           if (disposed) return
-          model.setMorphWeight("抗穿模", 0.5)
           engine.setModelTransform("reze", { visible: true })
         } catch {
           setEngineError(`Add model at public${MODEL_PATH}`)
@@ -387,7 +386,8 @@ export function EngineBridge({
 
         // ─── Clip: a persisted draft takes priority over the bundled demo
         //     motion, on whichever model just booted (custom or bundled). ───
-        const draft = loadDraft()
+        const draft = await loadDraft()
+        if (disposed) return
         const model = modelRef.current
         if (draft && model) {
           try {
@@ -395,15 +395,21 @@ export function EngineBridge({
             const morphSet = new Set(model.getMorphing().morphs.map((m) => m.name))
             const clip = clipRetainedForModel(draft.clip, boneSet, morphSet)
             model.loadClip(STUDIO_ANIM_NAME, clip)
-            suppressClipDirtyRef.current += 1
             replaceClip(clip)
-            documentDirtyRef.current = false
             setClipDisplayName(draft.clipDisplayName)
             model.show(STUDIO_ANIM_NAME)
-            model.seek(0)
-            lastSeekFrameRef.current = 0
+            const restoredFrame = Math.min(Math.max(0, draft.currentFrame ?? 0), Math.max(0, clip.frameCount))
+            model.seek(restoredFrame / 30)
+            setCurrentFrame(restoredFrame)
+            lastSeekFrameRef.current = restoredFrame
+            setSelectedBone(draft.selectedBone && boneSet.has(draft.selectedBone) ? draft.selectedBone : null)
+            if (draft.camera) {
+              engine.setCameraAlpha(draft.camera.alpha)
+              engine.setCameraBeta(draft.camera.beta)
+              engine.setCameraDistance(draft.camera.distance)
+            }
+            if (draft.timelineView) setTimelineView(draft.timelineView)
             requestAnimationFrame(() => engine.resetPhysics())
-            if (model.name === "reze") model.setMorphWeight("抗穿模", 0.5)
           } catch (e) {
             console.warn("[boot] stored draft failed to restore", e)
           }
@@ -416,15 +422,12 @@ export function EngineBridge({
             if (disposed) return
             const c = model?.getClip(STUDIO_ANIM_NAME)
             if (c) {
-              suppressClipDirtyRef.current += 1
               replaceClip(c)
-              documentDirtyRef.current = false
               setClipDisplayName(sanitizeClipFilenameBase(fileStem(VMD_PATH)))
               model?.show(STUDIO_ANIM_NAME)
               model?.seek(0)
               lastSeekFrameRef.current = 0
               requestAnimationFrame(() => engine.resetPhysics())
-              if (model?.name === "reze") model?.setMorphWeight("抗穿模", 0.5)
             }
           } catch (e) {
             console.warn(`VMD load failed — add file at public${VMD_PATH}`, e)
@@ -435,9 +438,7 @@ export function EngineBridge({
           // applyLoadedPmxModel).
           const fresh = emptyStudioClip()
           model.loadClip(STUDIO_ANIM_NAME, fresh)
-          suppressClipDirtyRef.current += 1
           replaceClip(fresh)
-          documentDirtyRef.current = false
           setClipDisplayName(sanitizeClipFilenameBase(restoredStem))
           model.show(STUDIO_ANIM_NAME)
           model.seek(0)
@@ -515,7 +516,6 @@ export function EngineBridge({
       model.seek(f / 30)
       maybeResetPhysicsAfterSeek(f)
       model.play()
-      if (model.name === "reze") model.setMorphWeight("抗穿模", 0.5)
     } else {
       model.pause()
     }

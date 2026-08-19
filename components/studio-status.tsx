@@ -110,7 +110,7 @@ export const StudioStatusFooter = memo(function StudioStatusFooter({
   const message = useStudioStatusSelector((s) => s.message)
   return (
     <footer
-      className="flex h-6 shrink-0 items-center gap-2 border-t border-border px-2 text-[10.5px] text-muted-foreground"
+      className="flex h-6 shrink-0 items-center gap-2 border-t border-line-strong px-2 text-[10.5px] text-muted-foreground"
       role="status"
       aria-live="polite"
     >
@@ -121,7 +121,7 @@ export const StudioStatusFooter = memo(function StudioStatusFooter({
             {pmxFileName}
           </span>
         </span>
-        <span className="text-border" aria-hidden>
+        <span className="text-muted-foreground" aria-hidden>
           ·
         </span>
         <span>
@@ -131,10 +131,10 @@ export const StudioStatusFooter = memo(function StudioStatusFooter({
           </span>
         </span>
       </div>
-      <div className="min-w-0 flex-1 truncate px-2 text-left text-[10px] text-muted-foreground/90">{message}</div>
+      <div className="min-w-0 flex-1 truncate px-2 text-left text-[10px] text-muted-foreground">{message}</div>
       <div className="flex shrink-0 items-center gap-x-2 tabular-nums">
         <span title="Main-thread / compositor frame rate">{fps != null ? `${fps} FPS` : "— FPS"}</span>
-        <span className="text-border" aria-hidden>
+        <span className="text-muted-foreground" aria-hidden>
           ·
         </span>
         <span>v{appVersion}</span>

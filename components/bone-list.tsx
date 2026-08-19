@@ -62,7 +62,7 @@ const GroupRow = memo(function GroupRow({
       </span>
       <span className="min-w-0 flex-1 truncate py-[1px] ">
         {name}{" "}
-        <span className="tabular-nums opacity-70">
+        <span className="tabular-nums">
           ({boneCount})
         </span>
       </span>
@@ -89,9 +89,7 @@ const BoneRow = memo(function BoneRow({
         "flex h-full w-full items-center gap-1 pl-6 pr-3 text-left font-mono text-[11px] font-normal leading-none",
         isActive
           ? "bg-blue-400/[0.08] text-blue-400 hover:bg-blue-400/12"
-          : kfCount > 0
-            ? "text-muted-foreground hover:bg-white/[0.03]"
-            : "text-muted-foreground/65 hover:bg-white/[0.03]",
+          : "text-muted-foreground hover:bg-white/[0.03]",
       )}
     >
       <span className="inline-flex w-1.5 shrink-0 text-[7px] leading-none" aria-hidden>
@@ -99,7 +97,7 @@ const BoneRow = memo(function BoneRow({
       </span>
       <span className="min-w-0 flex-1 truncate">{name}</span>
       {kfCount > 0 && (
-        <span className={cn("shrink-0 pr-1 tabular-nums text-[10px]", isActive ? "text-blue-400/80" : "opacity-55")}>
+        <span className={cn("shrink-0 pr-1 tabular-nums text-[10px]", isActive ? "text-blue-400" : "text-muted-foreground")}>
           [{kfCount}]
         </span>
       )}

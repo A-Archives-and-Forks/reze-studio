@@ -1207,6 +1207,13 @@ interface TimelineProps {
   setTab: (tab: string) => void
   /** Imperative playhead draw handle — see TimelineCanvasProps. */
   playheadDrawRef?: RefObject<((frame: number) => void) | null>
+  /** A restored draft's view (zoom + scroll), applied once as soon as it
+   *  arrives (boot restore resolves asynchronously, after this component has
+   *  already mounted with the plain defaults below). */
+  initialView?: { pxPerFrame: number; yZoom: number; scrollX: number }
+  /** Fires after mount on every view change (not on the initial render) —
+   *  lets the parent persist it without owning this state itself. */
+  onViewChange?: (view: { pxPerFrame: number; yZoom: number; scrollX: number }) => void
 }
 
 export function Timeline({
@@ -1215,6 +1222,8 @@ export function Timeline({
   tab,
   setTab,
   playheadDrawRef,
+  initialView,
+  onViewChange,
 }: TimelineProps) {
   const clip = useStudioSelector((s) => s.clip)
   const selectedBone = useStudioSelector((s) => s.selectedBone)
@@ -1225,13 +1234,24 @@ export function Timeline({
   const fc = clip?.frameCount ?? 0
   const [endDraft, setEndDraft] = useState<string | null>(null)
   const [frameDraft, setFrameDraft] = useState<string | null>(null)
-  const [pxPerFrame, setPxPerFrame] = useState(4)
+  // Lazy-initialized from a restored draft's view, read once at first mount —
+  // NOT patched in afterward. `currentFrame` above is global playback state,
+  // already settled by the time this component exists; if scrollX/pxPerFrame
+  // instead arrived a render or two later (the old approach: mount on plain
+  // defaults, patch via an effect once the prop showed up), the playhead and
+  // scroll would briefly disagree about where "frame N" is on screen — the
+  // draw() guard below hides anything that lands off the computed canvas
+  // area, so that disagreement showed up as the playhead or the whole
+  // timeline going blank until something forced another redraw. StudioPage
+  // only mounts <Timeline> once boot has fully resolved (see `studioReady`),
+  // so `initialView` is already final here, not a later patch.
+  const [pxPerFrame, setPxPerFrame] = useState(() => initialView?.pxPerFrame ?? 4)
   const pxRef = useRef(pxPerFrame)
   pxRef.current = pxPerFrame
-  const [yZoom, setYZoom] = useState(1)
+  const [yZoom, setYZoom] = useState(() => initialView?.yZoom ?? 1)
   const yZoomRef = useRef(yZoom)
   yZoomRef.current = yZoom
-  const [scrollX, setScrollX] = useState(0)
+  const [scrollX, setScrollX] = useState(() => initialView?.scrollX ?? 0)
   const scrollXRef = useRef(0)
   scrollXRef.current = scrollX
   const timelineAreaRef = useRef<HTMLDivElement>(null)
@@ -1263,9 +1283,31 @@ export function Timeline({
     setEndDraft(null)
   }, [clipVersion])
 
+  // Report view changes upward for persistence — skips the initial mount
+  // render so restoring a draft's view doesn't immediately re-save it back.
+  const viewMountedRef = useRef(false)
+  useEffect(() => {
+    if (!viewMountedRef.current) {
+      viewMountedRef.current = true
+      return
+    }
+    onViewChange?.({ pxPerFrame, yZoom, scrollX })
+  }, [pxPerFrame, yZoom, scrollX, onViewChange])
+
+  // `trackWidth` is 0 until the ResizeObserver below reports the real
+  // measurement, right after mount — the SAME mount whose scrollX just came
+  // from a restored draft (or a fresh default). That first measurement isn't
+  // a real resize, just the DOM catching up, but both effects below react to
+  // any `trackWidth` change; without this guard they'd "helpfully" clamp or
+  // recenter a scrollX that was already exactly right, on every single
+  // mount. Read-only in both effects, written by the bookkeeping effect
+  // declared after them so it reflects what THIS render saw, not what just
+  // changed — see the three effects for how that ordering is load-bearing.
+  const trackWidthKnownRef = useRef(false)
+
   // Clamp scroll when viewport or clip size changes (NOT on pxPerFrame — zoom handles its own scroll)
   useEffect(() => {
-    if (trackWidth <= 0) return
+    if (trackWidth <= 0 || !trackWidthKnownRef.current) return
     const maxScroll = Math.max(0, LABEL_W + fc * pxRef.current - trackWidth)
     setScrollX((s) => Math.min(maxScroll, Math.max(0, s)))
   }, [trackWidth, fc])
@@ -1275,7 +1317,7 @@ export function Timeline({
   // update `currentFrame` state — so page-turn is handled in the wrapped
   // `playheadDrawRef` below. This effect only covers scrub / paused navigation.
   useEffect(() => {
-    if (trackWidth <= 0) return
+    if (trackWidth <= 0 || !trackWidthKnownRef.current) return
     const viewable = trackWidth - LABEL_W
     if (viewable <= 0) return
     const px = pxRef.current
@@ -1289,6 +1331,14 @@ export function Timeline({
     const target = Math.max(0, Math.min(maxScroll, playheadX - viewable * 0.1))
     setScrollX(target)
   }, [currentFrame, trackWidth, fc])
+
+  // Marks trackWidth "known" for the two effects above, on their NEXT run —
+  // declared after both so it updates only once this render's checks have
+  // already happened, not before. From here on every real trackWidth change
+  // (an actual window resize) is treated normally.
+  useEffect(() => {
+    if (trackWidth > 0) trackWidthKnownRef.current = true
+  }, [trackWidth])
 
   // Wrap the parent's imperative draw handle so each 60Hz tick can page-turn
   // the timeline if the playhead leaves the visible window. `setScrollX` fires
@@ -1490,7 +1540,7 @@ export function Timeline({
   return (
     <div className="flex h-full w-full select-none flex-col" style={{ fontFamily: FONT }}>
       {/* Toolbar — compact controls + channel tabs; axis hues stay exact via inline `t.color` when set */}
-      <div className="flex h-[26px] shrink-0 flex-nowrap items-center gap-0.5 overflow-hidden border-b border-border bg-background px-1.5">
+      <div className="flex h-[26px] shrink-0 flex-nowrap items-center gap-0.5 overflow-hidden border-b border-line bg-background px-1.5">
         {/* Fixed square + Lucide icons — avoids uneven unicode box and mixed h-5 / h-[22px] misalignment */}
         {(
           [
@@ -1577,8 +1627,8 @@ export function Timeline({
             setCurrentFrame(f)
           }}
         />
-        <div className="mx-0.5 flex min-w-0 items-center gap-0.5 whitespace-nowrap rounded-md border border-border/50 bg-card px-1 py-px font-mono text-[9px] tabular-nums text-muted-foreground">
-          <span className="opacity-60">F</span>
+        <div className="mx-0.5 flex min-w-0 items-center gap-0.5 whitespace-nowrap rounded-chip border border-line bg-surface-raised px-1 py-px font-mono text-[9px] tabular-nums text-muted-foreground">
+          <span>F</span>
           <input
             type="text"
             inputMode="numeric"
@@ -1630,11 +1680,11 @@ export function Timeline({
             )}
           />
         </div>
-        <div className="mx-0.5 h-3.5 w-px shrink-0 bg-border" />
+        <div className="mx-0.5 h-3.5 w-px shrink-0 bg-line" />
         {/* Channel tabs */}
         {TABS.map((t) => {
           if (t.sep)
-            return <div key={t.key} className="mx-px h-3.5 w-px shrink-0 bg-border" />
+            return <div key={t.key} className="mx-px h-3.5 w-px shrink-0 bg-line" />
           const active = tab === t.key
           return (
             <Button

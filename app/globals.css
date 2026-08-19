@@ -68,7 +68,7 @@
 }
 
 :root {
-  --radius: 0.625rem;
+  --radius: 0.45rem;
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
   --card: oklch(1 0 0);
@@ -143,4 +143,37 @@
   body {
     @apply bg-background text-foreground;
   }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Editor chrome tokens — ported from reze-design's design language.
+
+   Two surfaces: `surface` is a panel's own ground (aliases --background,
+   already the base app fill), `surface-raised` is anything stacked on top of
+   it — a dropdown, a dialog, a floating menu (aliases --popover, already a
+   step lighter). Two edges: `line` divides inside one surface, `line-strong`
+   bounds a surface from what's outside it. reze-design's own values (6%/12%)
+   read too faint here — that app leans on backdrop-blur and shadow-float over
+   a live canvas for depth, reze-studio's panels are flat and opaque with
+   nothing behind them, so borders carry more of the separation on their own
+   and need more contrast: 10%/16%.
+
+   Text stays shadcn's two tiers (`text-foreground` / `text-muted-foreground`)
+   — never an opacity modifier on either, that's the same tier rendered
+   inconsistently, not a third tier.
+
+   Radii here are for chrome with its own panel-like footprint (dialogs,
+   floating dropdowns, chips) — 12/8/6. Ordinary controls (buttons, inputs)
+   keep riding the base --radius above.
+   ───────────────────────────────────────────────────────────────────────── */
+@theme inline {
+  --color-surface: var(--background);
+  --color-surface-raised: var(--popover);
+  --color-scrim: oklch(0.12 0.008 260 / 0.55);
+  --color-line: oklch(1 0 0 / 0.1);
+  --color-line-strong: oklch(1 0 0 / 0.16);
+
+  --radius-surface: 12px;
+  --radius-interior: 8px;
+  --radius-chip: 6px;
 }

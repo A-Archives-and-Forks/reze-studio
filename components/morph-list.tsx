@@ -30,10 +30,8 @@ export const MorphList = memo(function MorphList({ morphNames, clip, selectedMor
                 className={cn(
                   "flex w-full items-center py-0.5 pl-3 pr-3 text-left text-[11px] font-mono leading-snug transition-colors",
                   isActive
-                    ? "bg-blue-400/[0.08] text-blue-400"
-                    : kfCount > 0
-                      ? "text-muted-foreground hover:bg-white/[0.03]"
-                      : "text-muted-foreground/65 hover:bg-white/[0.03]",
+                    ? "bg-blue-400/[0.08] text-blue-400 hover:bg-blue-400/12"
+                    : "text-muted-foreground hover:bg-white/[0.03]",
                 )}
               >
                 <span className="inline-flex w-1.5 shrink-0 text-[7px] leading-none" aria-hidden>
@@ -41,7 +39,7 @@ export const MorphList = memo(function MorphList({ morphNames, clip, selectedMor
                 </span>
                 <span className="ml-1 min-w-0 flex-1 truncate">{name}</span>
                 {kfCount > 0 && (
-                  <span className={cn("shrink-0 pr-1 tabular-nums text-[10px]", isActive ? "text-blue-400/80" : "opacity-55")}>
+                  <span className={cn("shrink-0 pr-1 tabular-nums text-[10px]", isActive ? "text-blue-400" : "text-muted-foreground")}>
                     [{kfCount}]
                   </span>
                 )}
