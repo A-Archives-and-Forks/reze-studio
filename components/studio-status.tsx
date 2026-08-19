@@ -16,6 +16,7 @@ import {
   useSyncExternalStore,
   type ReactNode,
 } from "react"
+import { cn } from "@/lib/utils"
 
 export type StudioStatusState = {
   pmxFileName: string
@@ -99,10 +100,12 @@ export function useStudioStatusActions(): StudioStatusActions {
 export const StudioStatusFooter = memo(function StudioStatusFooter({
   clipDisplayName,
   hasClip,
+  ikEnabled,
   appVersion,
 }: {
   clipDisplayName: string
   hasClip: boolean
+  ikEnabled: boolean
   appVersion: string
 }) {
   const pmxFileName = useStudioStatusSelector((s) => s.pmxFileName)
@@ -128,6 +131,15 @@ export const StudioStatusFooter = memo(function StudioStatusFooter({
           Animation:{" "}
           <span className="font-medium text-foreground" title={hasClip ? `${clipDisplayName}.vmd` : undefined}>
             {hasClip ? `${clipDisplayName}.vmd` : "—"}
+          </span>
+        </span>
+        <span className="text-muted-foreground" aria-hidden>
+          ·
+        </span>
+        <span title="Whether this clip's IK chains solve — Settings menu to change">
+          IK:{" "}
+          <span className={cn("font-medium", ikEnabled ? "text-foreground" : "text-amber-400")}>
+            {ikEnabled ? "On" : "Off"}
           </span>
         </span>
       </div>

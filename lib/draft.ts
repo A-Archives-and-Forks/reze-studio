@@ -19,6 +19,7 @@
 
 import type { AnimationClip, BoneInterpolation, BoneKeyframe, IkKeyframe, MorphKeyframe } from "reze-engine"
 import { Quat, Vec3 } from "reze-engine"
+import type { SelectedKeyframe } from "@/context/studio-context"
 
 const DB_NAME = "reze-studio-draft"
 const DB_VERSION = 1
@@ -56,18 +57,25 @@ export type StoredTimelineView = { pxPerFrame: number; yZoom: number; scrollX: n
 export type DraftExtras = {
   currentFrame?: number
   selectedBone?: string | null
+  selectedMorph?: string | null
+  selectedMaterial?: string | null
+  /** Left-panel bone group filter (e.g. "All Bones", "Arms") — a fixed
+   *  taxonomy, not model-dependent, so it's restored unvalidated. */
+  selectedGroup?: string
+  /** Right-aside tab: selection-bound Properties vs per-model Materials. */
+  rightPanelTab?: "properties" | "materials"
+  /** Timeline's channel tab (All Rot, X/Y/Z, All Trans, Morph, ...). */
+  timelineTab?: string
+  /** Dopesheet/curve multi-selection. */
+  selectedKeyframes?: SelectedKeyframe[]
+  /** The IK toggle's own display state — the clip's `ikTracks` data (which
+   *  drives this) is already part of `clip` itself and restores with it. */
+  ikEnabled?: boolean
   camera?: StoredCamera
   timelineView?: StoredTimelineView
 }
 
-type StoredDraft = {
-  clipDisplayName: string
-  clip: SerializedClip
-  currentFrame?: number
-  selectedBone?: string | null
-  camera?: StoredCamera
-  timelineView?: StoredTimelineView
-}
+type StoredDraft = DraftExtras & { clipDisplayName: string; clip: SerializedClip }
 
 export function serializeClip(clip: AnimationClip): SerializedClip {
   const boneTracks: [string, SerializedBoneKeyframe[]][] = Array.from(clip.boneTracks, ([name, track]) => [
@@ -135,12 +143,9 @@ async function write(clipDisplayName: string, clip: AnimationClip, extras: Draft
   if (!db) return
   try {
     const payload: StoredDraft = {
+      ...extras,
       clipDisplayName,
       clip: serializeClip(clip),
-      currentFrame: extras.currentFrame,
-      selectedBone: extras.selectedBone,
-      camera: extras.camera,
-      timelineView: extras.timelineView,
     }
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE, "readwrite")
@@ -205,12 +210,8 @@ export async function loadDraft(): Promise<({ clipDisplayName: string; clip: Ani
       `[draft] restoring "${rec.clipDisplayName}" — ${rec.clip.boneTracks.length} bone tracks, ${rec.clip.morphTracks.length} morph tracks`,
     )
     return {
-      clipDisplayName: rec.clipDisplayName,
+      ...rec,
       clip: deserializeClip(rec.clip),
-      currentFrame: rec.currentFrame,
-      selectedBone: rec.selectedBone,
-      camera: rec.camera,
-      timelineView: rec.timelineView,
     }
   } catch (e) {
     console.warn("[draft] stored draft failed to load — starting fresh", e)

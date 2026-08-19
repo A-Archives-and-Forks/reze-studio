@@ -69,6 +69,12 @@ interface EngineBridgeProps {
   /** A restored draft's timeline view (zoom + scroll) — set once, on boot
    *  restore, so StudioPage can hand it to <Timeline> as its `initialView` prop. */
   setTimelineView: Dispatch<SetStateAction<StoredTimelineView | undefined>>
+  /** The rest of a restored draft's UI state — all StudioPage-local, so it
+   *  can't be reached via useStudioActions() the way selectedMorph/Material
+   *  can (see below). */
+  setSelectedGroup: Dispatch<SetStateAction<string>>
+  setRightPanelTab: Dispatch<SetStateAction<"properties" | "materials">>
+  setTimelineTab: Dispatch<SetStateAction<string>>
   setPmxBoneNames: Dispatch<SetStateAction<ReadonlySet<string>>>
   setModelBoneOrder: Dispatch<SetStateAction<string[]>>
   setMorphNames: Dispatch<SetStateAction<string[]>>
@@ -86,6 +92,9 @@ export function EngineBridge({
   currentFrameRef,
   playheadDrawRef,
   setTimelineView,
+  setSelectedGroup,
+  setRightPanelTab,
+  setTimelineTab,
   setPmxBoneNames,
   setModelBoneOrder,
   setMorphNames,
@@ -106,6 +115,7 @@ export function EngineBridge({
     setSelectedMaterial,
     setGizmoVisible,
     setSelectedKeyframes,
+    setIkEnabled,
   } = useStudioActions()
   const { currentFrame, setCurrentFrame, playing, setPlaying } = usePlayback()
   const playbackFrameRef = usePlaybackFrameRef()
@@ -393,6 +403,7 @@ export function EngineBridge({
           try {
             const boneSet = new Set(model.getSkeleton().bones.map((b) => b.name))
             const morphSet = new Set(model.getMorphing().morphs.map((m) => m.name))
+            const materialSet = new Set(model.getMaterials().map((m) => m.name))
             const clip = clipRetainedForModel(draft.clip, boneSet, morphSet)
             model.loadClip(STUDIO_ANIM_NAME, clip)
             replaceClip(clip)
@@ -403,6 +414,22 @@ export function EngineBridge({
             setCurrentFrame(restoredFrame)
             lastSeekFrameRef.current = restoredFrame
             setSelectedBone(draft.selectedBone && boneSet.has(draft.selectedBone) ? draft.selectedBone : null)
+            setSelectedMorph(draft.selectedMorph && morphSet.has(draft.selectedMorph) ? draft.selectedMorph : null)
+            setSelectedMaterial(
+              draft.selectedMaterial && materialSet.has(draft.selectedMaterial) ? draft.selectedMaterial : null,
+            )
+            setSelectedGroup(draft.selectedGroup ?? "All Bones")
+            setRightPanelTab(draft.rightPanelTab ?? "properties")
+            setTimelineTab(draft.timelineTab ?? "allRot")
+            // ikEnabled's display state only — clip.ikTracks (what actually
+            // drives IK, live and on export) is already restored above as
+            // part of the clip itself.
+            setIkEnabled(draft.ikEnabled ?? true)
+            // Same filter the PMX-swap path uses: drop curve selections whose
+            // bone no longer exists, keep dope selections and morph refs as-is.
+            setSelectedKeyframes(
+              (draft.selectedKeyframes ?? []).filter((s) => s.type !== "curve" || !s.bone || boneSet.has(s.bone)),
+            )
             if (draft.camera) {
               engine.setCameraAlpha(draft.camera.alpha)
               engine.setCameraBeta(draft.camera.beta)

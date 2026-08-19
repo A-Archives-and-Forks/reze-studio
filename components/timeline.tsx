@@ -113,14 +113,19 @@ function getChannelsForTab(tab: string): Channel[] {
 
 function getAxisConfig(tab: string) {
   if (tab === "morph") {
-    return { min: 0, max: 1, unit: "", side: "left" as const, step: 0.25, subStep: 0.125 }
+    // Weight is [0, 1], but a keyframe sitting exactly on that boundary is
+    // hard to click when the plotted range matches it exactly — a margin on
+    // both ends keeps 0 and 1 off the very edge of the graph. tickMin/tickMax
+    // hold the tick loop to the real [0, 1] data range regardless — the
+    // margin is for click targets, not for drawing ticks past the data.
+    return { min: -0.1, max: 1.1, tickMin: 0, tickMax: 1, unit: "", side: "left" as const, step: 0.25, subStep: 0.125 }
   }
   const chans = getChannelsForTab(tab)
   const isRot = chans[0].group === "rot"
   if (isRot) {
-    return { min: -90, max: 90, unit: "°", side: "left" as const, step: 30, subStep: 15 }
+    return { min: -90, max: 90, tickMin: -90, tickMax: 90, unit: "°", side: "left" as const, step: 30, subStep: 15 }
   } else {
-    return { min: -10, max: 10, unit: "", side: "left" as const, step: 5, subStep: 2.5 }
+    return { min: -10, max: 10, tickMin: -10, tickMax: 10, unit: "", side: "left" as const, step: 5, subStep: 2.5 }
   }
 }
 
@@ -589,9 +594,13 @@ function TimelineCanvas({
 
     ctx.font = `9px ${FONT}`
     const isRotAxis = channels[0]?.group === "rot"
-    // Snap tick iteration to multiples of subStep within the current view range.
-    const firstTick = Math.ceil(vMin / ax.subStep) * ax.subStep
-    const lastTick = Math.floor(vMax / ax.subStep) * ax.subStep
+    // Snap tick iteration to multiples of subStep within the current view range,
+    // further clamped to tickMin/tickMax — morph's plotted range pads past
+    // [0, 1] for click-target room, but there's nothing to tick past the data.
+    const tickLo = Math.max(vMin, ax.tickMin)
+    const tickHi = Math.min(vMax, ax.tickMax)
+    const firstTick = Math.ceil(tickLo / ax.subStep) * ax.subStep
+    const lastTick = Math.floor(tickHi / ax.subStep) * ax.subStep
     const vSteps = Math.max(0, Math.round((lastTick - firstTick) / ax.subStep))
     for (let i = 0; i <= vSteps; i++) {
       const v = firstTick + i * ax.subStep
@@ -1686,12 +1695,17 @@ export function Timeline({
           if (t.sep)
             return <div key={t.key} className="mx-px h-3.5 w-px shrink-0 bg-line" />
           const active = tab === t.key
+          // A selection scopes the tabs to what it can actually show: a
+          // selected morph has no rotation/translation to plot, a selected
+          // bone has no morph weight. Nothing selected leaves every tab open.
+          const disabled = selectedMorph ? t.key !== "morph" : selectedBone ? t.key === "morph" : false
           return (
             <Button
               type="button"
               key={t.key}
               variant="ghost"
               size="sm"
+              disabled={disabled}
               onClick={() => setTab(t.key)}
               className={cn(
                 "h-5 max-h-5 min-h-5 shrink-0 overflow-hidden rounded-md px-1.5 font-mono text-[10px]",

@@ -43,6 +43,12 @@ export type StudioState = {
    *  `setSelectedBone` call re-shows the gizmo, including re-selecting the
    *  same bone — so the user never gets stuck with a hidden gizmo. */
   gizmoVisible: boolean
+  /** Whether IK solves for this clip — a document setting, not an engine-wide
+   *  switch: toggling it rewrites the clip's own `ikTracks` (see
+   *  studio.tsx's toggleIkEnabled), the same data a VMD's IK/display block
+   *  round-trips through, so it's undoable and travels with the clip rather
+   *  than the session. Resets to true whenever a genuinely new clip loads. */
+  ikEnabled: boolean
   selectedKeyframes: SelectedKeyframe[]
   /** Immutable clone of `clip` taken at the last commit / undo / redo. Lets
    *  us push a *clean* snapshot onto history even though slider preview
@@ -65,6 +71,7 @@ export type StudioActions = {
   setSelectedMorph: Dispatch<SetStateAction<string | null>>
   setSelectedMaterial: Dispatch<SetStateAction<string | null>>
   setGizmoVisible: Dispatch<SetStateAction<boolean>>
+  setIkEnabled: Dispatch<SetStateAction<boolean>>
   setSelectedKeyframes: StudioKeyframesSetter
   undo: () => void
   redo: () => void
@@ -77,6 +84,7 @@ const INITIAL_STATE: StudioState = {
   selectedMorph: null,
   selectedMaterial: null,
   gizmoVisible: true,
+  ikEnabled: true,
   selectedKeyframes: [],
   clipSnapshot: null,
   past: [],
@@ -183,6 +191,7 @@ function createStudioStore(): StudioStore {
     setSelectedMorph: (payload) => update("selectedMorph", payload),
     setSelectedMaterial: (payload) => update("selectedMaterial", payload),
     setGizmoVisible: (payload) => update("gizmoVisible", payload),
+    setIkEnabled: (payload) => update("ikEnabled", payload),
     setSelectedKeyframes: (payload) => update("selectedKeyframes", payload),
     undo: () => {
       if (state.past.length === 0) return

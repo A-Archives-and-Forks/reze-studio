@@ -14,7 +14,7 @@ import {
 } from "react"
 import Link from "next/link"
 import Image from "next/image"
-import { FilePlus2, FolderOpen, FileMusic, FileDown, RotateCcw } from "lucide-react"
+import { FilePlus2, FolderOpen, FileMusic, FileDown, RotateCcw, Check } from "lucide-react"
 import { Engine, Model, Vec3, parsePmxFolderInput, pmxFileAtRelativePath } from "reze-engine"
 import { Button } from "@/components/ui/button"
 import {
@@ -115,6 +115,7 @@ type StudioLeftPanelProps = {
   docsReadmeUrl: string
   repoUrl: string
   appVersion: string
+  onToggleIkEnabled: () => void
 }
 
 /** File menu + bone/morph lists — lives in page so the shell isn’t a separate layout file. */
@@ -145,8 +146,10 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
   docsReadmeUrl,
   repoUrl,
   appVersion,
+  onToggleIkEnabled,
 }: StudioLeftPanelProps) {
   const clip = useStudioSelector((s) => s.clip)
+  const ikEnabled = useStudioSelector((s) => s.ikEnabled)
   const { defaultLayout: boneMorphLayout, onLayoutChanged: onBoneMorphLayoutChanged } = useDefaultLayout({
     id: "reze-studio.left-panel",
     panelIds: ["bones", "morphs"],
@@ -294,6 +297,19 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
               </MenubarTrigger>
               <MenubarContent sideOffset={4} className="min-w-32 p-0.5 text-xs">
                 <MenubarGroup>
+                  <MenubarItem
+                    className="justify-between gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
+                    disabled={!clip}
+                    onSelect={onToggleIkEnabled}
+                  >
+                    <span>IK Enabled</span>
+                    {ikEnabled ? (
+                      <Check className="size-3 shrink-0 text-blue-400" />
+                    ) : (
+                      <span className="size-3 shrink-0" />
+                    )}
+                  </MenubarItem>
+                  <MenubarSeparator className="my-0.5" />
                   <MenubarItem className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground" disabled>
                     Theme…
                   </MenubarItem>
@@ -376,6 +392,7 @@ export function StudioPage() {
   const selectedMorph = useStudioSelector((s) => s.selectedMorph)
   const selectedMaterial = useStudioSelector((s) => s.selectedMaterial)
   const selectedKeyframes = useStudioSelector((s) => s.selectedKeyframes)
+  const ikEnabled = useStudioSelector((s) => s.ikEnabled)
   const {
     commit,
     replaceClip,
@@ -384,6 +401,7 @@ export function StudioPage() {
     setSelectedMorph,
     setSelectedMaterial,
     setSelectedKeyframes,
+    setIkEnabled,
     undo,
     redo,
   } = useStudioActions()
@@ -399,11 +417,28 @@ export function StudioPage() {
    *  EngineBridge's boot restore, handed to <Timeline> as `initialView`. */
   const [restoredTimelineView, setRestoredTimelineView] = useState<StoredTimelineView | undefined>(undefined)
   /** Mirrors for use inside stable callbacks (draft persistence) without
-   *  pulling `selectedBone` into their dependency arrays. */
+   *  pulling these values into their dependency arrays. More mirrors sit
+   *  next to selectedGroup/rightPanelTab/timelineTab below, once those exist. */
   const selectedBoneRef = useRef(selectedBone)
   useEffect(() => {
     selectedBoneRef.current = selectedBone
   }, [selectedBone])
+  const selectedMorphRef = useRef(selectedMorph)
+  useEffect(() => {
+    selectedMorphRef.current = selectedMorph
+  }, [selectedMorph])
+  const selectedMaterialRef = useRef(selectedMaterial)
+  useEffect(() => {
+    selectedMaterialRef.current = selectedMaterial
+  }, [selectedMaterial])
+  const selectedKeyframesRef = useRef(selectedKeyframes)
+  useEffect(() => {
+    selectedKeyframesRef.current = selectedKeyframes
+  }, [selectedKeyframes])
+  const ikEnabledRef = useRef(ikEnabled)
+  useEffect(() => {
+    ikEnabledRef.current = ikEnabled
+  }, [ikEnabled])
   /** Latest timeline view reported by <Timeline> — read fresh at save time,
    *  same reasoning as the camera below (no owning state here, just a mirror). */
   const timelineViewRef = useRef<StoredTimelineView | undefined>(undefined)
@@ -453,6 +488,19 @@ export function StudioPage() {
   const [timelineTab, setTimelineTab] = useState("allRot")
   /** Right aside tab: "properties" (selection-bound) vs "materials" (model-bound). */
   const [rightPanelTab, setRightPanelTab] = useState<"properties" | "materials">("properties")
+  // Mirrors of the three above, for draft persistence — see selectedBoneRef.
+  const selectedGroupRef = useRef(selectedGroup)
+  useEffect(() => {
+    selectedGroupRef.current = selectedGroup
+  }, [selectedGroup])
+  const timelineTabRef = useRef(timelineTab)
+  useEffect(() => {
+    timelineTabRef.current = timelineTab
+  }, [timelineTab])
+  const rightPanelTabRef = useRef(rightPanelTab)
+  useEffect(() => {
+    rightPanelTabRef.current = rightPanelTab
+  }, [rightPanelTab])
 
   /** Folder upload contained multiple `.pmx`; user picks one then clicks Load. */
   const [pmxPickFiles, setPmxPickFiles] = useState<File[] | null>(null)
@@ -523,6 +571,13 @@ export function StudioPage() {
     return {
       currentFrame: currentFrameRef.current,
       selectedBone: selectedBoneRef.current,
+      selectedMorph: selectedMorphRef.current,
+      selectedMaterial: selectedMaterialRef.current,
+      selectedGroup: selectedGroupRef.current,
+      rightPanelTab: rightPanelTabRef.current,
+      timelineTab: timelineTabRef.current,
+      selectedKeyframes: selectedKeyframesRef.current,
+      ikEnabled: ikEnabledRef.current,
       camera: engine
         ? { alpha: engine.getCameraAlpha(), beta: engine.getCameraBeta(), distance: engine.getCameraDistance() }
         : undefined,
@@ -533,7 +588,20 @@ export function StudioPage() {
   useEffect(() => {
     if (clip == null) return
     saveDraftSoon(clipDisplayName, clip, buildDraftExtras())
-  }, [clip, clipDisplayName, currentFrame, selectedBone, buildDraftExtras])
+  }, [
+    clip,
+    clipDisplayName,
+    currentFrame,
+    selectedBone,
+    selectedMorph,
+    selectedMaterial,
+    selectedGroup,
+    rightPanelTab,
+    timelineTab,
+    selectedKeyframes,
+    ikEnabled,
+    buildDraftExtras,
+  ])
 
   /** <Timeline>'s onViewChange — the only draft field with no other event to
    *  ride along on, so it schedules its own save directly from refs. */
@@ -602,8 +670,11 @@ export function StudioPage() {
       setSelectedMaterial(null)
       setSelectedBone(b)
       setSelectedKeyframes([])
+      // Mirror of handleSelectMorph's setTimelineTab("morph") — a bone has no
+      // morph weight to plot, so leave the morph tab if that's where we were.
+      setTimelineTab((t) => (t === "morph" ? "allRot" : t))
     },
-    [setSelectedBone, setSelectedMorph, setSelectedMaterial, setSelectedKeyframes],
+    [setSelectedBone, setSelectedMorph, setSelectedMaterial, setSelectedKeyframes, setTimelineTab],
   )
 
   const revealBoneInList = useCallback(
@@ -885,25 +956,58 @@ export function StudioPage() {
     }
   }, [clip, selectedBone, commit, setSelectedKeyframes])
 
-  const clearSelectedBoneTrack = useCallback(() => {
-    if (!clip || !selectedBone) return
-    if (!clip.boneTracks.has(selectedBone)) return
-    const boneTracks = new Map(clip.boneTracks)
-    boneTracks.delete(selectedBone)
-    setSelectedKeyframes([])
-    commit({ ...clip, boneTracks })
-  }, [clip, selectedBone, commit, setSelectedKeyframes])
+  /** Clears whichever track is selected — bone or morph. Bone takes priority
+   *  since the two are meant to be mutually exclusive in the inspector, but
+   *  both are checked in case selection state ever drifts out of sync with
+   *  what's displayed. */
+  const clearSelectedTrack = useCallback(() => {
+    if (!clip) return
+    if (selectedBone && clip.boneTracks.has(selectedBone)) {
+      const boneTracks = new Map(clip.boneTracks)
+      boneTracks.delete(selectedBone)
+      setSelectedKeyframes([])
+      commit({ ...clip, boneTracks })
+      return
+    }
+    if (selectedMorph && clip.morphTracks.has(selectedMorph)) {
+      const morphTracks = new Map(clip.morphTracks)
+      morphTracks.delete(selectedMorph)
+      setSelectedKeyframes([])
+      commit({ ...clip, morphTracks })
+    }
+  }, [clip, selectedBone, selectedMorph, commit, setSelectedKeyframes])
+
+  /** Rewrites the clip's own `ikTracks` to a blanket on/off — the same data a
+   *  VMD's IK/display block round-trips through, not the engine-wide switch
+   *  (that would suppress IK for every model in the scene, and wouldn't
+   *  travel with the clip on export). Disabling writes one `{frame: 0,
+   *  enabled: false}` step per IK bone the loaded model actually has;
+   *  enabling clears the field back to "leave IK as the host sets it". */
+  const toggleIkEnabled = useCallback(() => {
+    if (!clip) return
+    const next = !ikEnabled
+    setIkEnabled(next)
+    if (next) {
+      commit({ ...clip, ikTracks: undefined })
+      return
+    }
+    const model = modelRef.current
+    const ikBoneNames = model ? model.getSkeleton().bones.filter((b) => b.ikLinks?.length).map((b) => b.name) : []
+    const ikTracks = new Map(ikBoneNames.map((name) => [name, [{ frame: 0, enabled: false }]]))
+    commit({ ...clip, ikTracks })
+  }, [clip, ikEnabled, setIkEnabled, commit])
 
   const syncStudioAfterNewClip = useCallback(
     (model: Model) => {
       setCurrentFrame(0)
       setPlaying(false)
       setSelectedKeyframes([])
+      setIkEnabled(true)
       setClipVersion((v) => v + 1)
       model.show(STUDIO_ANIM_NAME)
       model.seek(0)
     },
-    [setSelectedKeyframes, setCurrentFrame, setPlaying],
+    [setSelectedKeyframes, setCurrentFrame, setPlaying, setIkEnabled],
   )
 
   const applyLoadedPmxModel = useCallback(
@@ -956,6 +1060,9 @@ export function StudioPage() {
         nextDisplay = sanitizeClipFilenameBase(displayStem)
         nextFrame = 0
         nextPlaying = false
+        // Only a genuinely fresh clip resets the toggle — a retained timeline
+        // keeps whatever ikEnabled it already had, same as its ikTracks data.
+        setIkEnabled(true)
       }
 
       model.loadClip(STUDIO_ANIM_NAME, nextClip)
@@ -969,7 +1076,7 @@ export function StudioPage() {
       else model.pause()
       setEngineError(null)
     },
-    [replaceClip, setSelectedBone, setSelectedMorph, setSelectedMaterial, setSelectedKeyframes, setClipDisplayName, setCurrentFrame, setPlaying],
+    [replaceClip, setSelectedBone, setSelectedMorph, setSelectedMaterial, setSelectedKeyframes, setIkEnabled, setClipDisplayName, setCurrentFrame, setPlaying],
   )
 
   const loadPmxFromFolder = useCallback(
@@ -1114,12 +1221,13 @@ export function StudioPage() {
     setSelectedMorph(null)
     setSelectedMaterial(null)
     setSelectedKeyframes([])
+    setIkEnabled(true)
     // Bump after clearing selections so downstream effects don't see stale keyframes.
     setClipVersion((v) => v + 1)
     model.show(STUDIO_ANIM_NAME)
     model.seek(0)
     blurActiveElement()
-  }, [replaceClip, setClipDisplayName, setSelectedBone, setSelectedMorph, setSelectedMaterial, setSelectedKeyframes, setCurrentFrame, setPlaying, blurActiveElement])
+  }, [replaceClip, setClipDisplayName, setSelectedBone, setSelectedMorph, setSelectedMaterial, setSelectedKeyframes, setIkEnabled, setCurrentFrame, setPlaying, blurActiveElement])
 
   /** Discards the uploaded model + draft and reboots onto the bundled default —
    *  a reload reruns EngineBridge's boot sequence rather than duplicating its
@@ -1148,6 +1256,9 @@ export function StudioPage() {
         currentFrameRef={currentFrameRef}
         playheadDrawRef={playheadDrawRef}
         setTimelineView={setRestoredTimelineView}
+        setSelectedGroup={setSelectedGroup}
+        setRightPanelTab={setRightPanelTab}
+        setTimelineTab={setTimelineTab}
         setPmxBoneNames={setPmxBoneNames}
         setModelBoneOrder={setModelBoneOrder}
         setMorphNames={setMorphNames}
@@ -1183,6 +1294,7 @@ export function StudioPage() {
           docsReadmeUrl={DOCS_README_URL}
           repoUrl={REPO_URL}
           appVersion={APP_VERSION}
+          onToggleIkEnabled={toggleIkEnabled}
         />
 
         {/* Center: viewport + timeline, resizable */}
@@ -1236,7 +1348,7 @@ export function StudioPage() {
                 onInsertKeyframeAtPlayhead={insertKeyframeAtPlayhead}
                 onDeleteSelectedKeyframes={deleteSelectedKeyframes}
                 onSimplifySelectedBoneTrack={simplifySelectedBoneTrack}
-                onClearSelectedBoneTrack={clearSelectedBoneTrack}
+                onClearSelectedTrack={clearSelectedTrack}
                 timelineTab={timelineTab}
                 setTimelineTab={setTimelineTab}
                 clipVersion={clipVersion}
@@ -1261,6 +1373,7 @@ export function StudioPage() {
       <StudioStatusFooter
         clipDisplayName={clipDisplayName}
         hasClip={clip != null}
+        ikEnabled={ikEnabled}
         appVersion={APP_VERSION}
       />
     </div>

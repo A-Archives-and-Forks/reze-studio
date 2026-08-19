@@ -309,7 +309,7 @@ interface PropertiesInspectorProps {
   onInsertKeyframeAtPlayhead: () => void
   onDeleteSelectedKeyframes: () => void
   onSimplifySelectedBoneTrack: () => void
-  onClearSelectedBoneTrack: () => void
+  onClearSelectedTrack: () => void
   timelineTab: string
   setTimelineTab: (tab: string) => void
   clipVersion: number
@@ -320,7 +320,7 @@ export const PropertiesInspector = memo(function PropertiesInspector({
   onInsertKeyframeAtPlayhead,
   onDeleteSelectedKeyframes,
   onSimplifySelectedBoneTrack,
-  onClearSelectedBoneTrack,
+  onClearSelectedTrack,
   timelineTab,
   setTimelineTab,
   clipVersion,
@@ -341,8 +341,9 @@ export const PropertiesInspector = memo(function PropertiesInspector({
   const canDelete = clip && singleSel !== null
   const canInsert = !!(clip && (selectedBone || selectedMorph))
   const boneTrackLen = selectedBone && clip ? (clip.boneTracks.get(selectedBone)?.length ?? 0) : 0
+  const morphTrackLen = selectedMorph && clip ? (clip.morphTracks.get(selectedMorph)?.length ?? 0) : 0
   const canSimplify = !!(clip && selectedBone && boneTrackLen > 2)
-  const canClear = !!(clip && selectedBone && boneTrackLen > 0)
+  const canClear = !!(clip && ((selectedBone && boneTrackLen > 0) || (selectedMorph && morphTrackLen > 0)))
 
   const showBoneStats = !!(selectedBone && clip && !selectedMorph && !multiSel)
 
@@ -602,8 +603,8 @@ export const PropertiesInspector = memo(function PropertiesInspector({
               size="xs"
               className="h-6 flex-1 px-0.5 text-[11px]"
               disabled={!canClear}
-              onClick={onClearSelectedBoneTrack}
-              title="Remove all keyframes on the selected bone track"
+              onClick={onClearSelectedTrack}
+              title="Remove all keyframes on the selected bone or morph track"
             >
               Clear
             </Button>
