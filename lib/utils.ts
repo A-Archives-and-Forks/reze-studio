@@ -24,6 +24,55 @@ export function clipAfterKeyframeEdit(clip: AnimationClip): AnimationClip {
   return { ...clip, frameCount: Math.max(1, clip.frameCount, lastKey) }
 }
 
+export function emptyStudioClip(): AnimationClip {
+  return { boneTracks: new Map(), morphTracks: new Map(), frameCount: DEFAULT_STUDIO_CLIP_FRAMES }
+}
+
+/** Keep only tracks whose bones/morphs exist on the new model — used both for
+ *  a mid-session PMX swap and for restoring a persisted draft onto whichever
+ *  model booted (the two may have drifted out of sync). */
+export function clipRetainedForModel(
+  clip: AnimationClip,
+  boneNames: ReadonlySet<string>,
+  morphNames: ReadonlySet<string>,
+): AnimationClip {
+  const boneTracks = new Map<string, BoneKeyframe[]>()
+  for (const [name, track] of clip.boneTracks) {
+    if (!boneNames.has(name) || !track?.length) continue
+    boneTracks.set(
+      name,
+      track.map((kf) => ({ ...kf })),
+    )
+  }
+  const morphTracks = new Map<string, MorphKeyframe[]>()
+  for (const [name, track] of clip.morphTracks) {
+    if (!morphNames.has(name) || !track?.length) continue
+    morphTracks.set(
+      name,
+      track.map((kf) => ({ ...kf })),
+    )
+  }
+  let inferred = 0
+  for (const t of boneTracks.values()) for (const k of t) inferred = Math.max(inferred, k.frame)
+  for (const t of morphTracks.values()) for (const k of t) inferred = Math.max(inferred, k.frame)
+  // IK state rides along, filtered the same way: a chain whose IK bone the new
+  // model does not have is as meaningless as a track for a bone it lacks.
+  // Rebuilding a clip field by field is how this data gets lost — a motion that
+  // switches leg IK off would silently start driving the legs again after a
+  // model swap, and export without the instruction it arrived with.
+  let ikTracks: AnimationClip["ikTracks"]
+  if (clip.ikTracks?.size) {
+    ikTracks = new Map()
+    for (const [name, track] of clip.ikTracks) {
+      if (boneNames.has(name) && track?.length) ikTracks.set(name, track.map((k) => ({ ...k })))
+    }
+    if (ikTracks.size === 0) ikTracks = undefined
+  }
+  const empty = boneTracks.size === 0 && morphTracks.size === 0
+  const end = empty ? Math.max(clip.frameCount, DEFAULT_STUDIO_CLIP_FRAMES) : Math.max(clip.frameCount, inferred)
+  return { boneTracks, morphTracks, ikTracks, frameCount: end }
+}
+
 // ─── Keyframe insert + engine pose read/write ────────────────────────────
 /** Default VMD-style linear-ish handles (127-space). */
 export const VMD_LINEAR_DEFAULT_IP: BoneInterpolation = {

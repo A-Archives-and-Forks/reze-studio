@@ -14,7 +14,7 @@ import {
 } from "react"
 import Link from "next/link"
 import Image from "next/image"
-import { FilePlus2, FolderOpen, FileMusic, FileDown } from "lucide-react"
+import { FilePlus2, FolderOpen, FileMusic, FileDown, RotateCcw } from "lucide-react"
 import { Engine, Model, Vec3, parsePmxFolderInput, pmxFileAtRelativePath } from "reze-engine"
 import { Button } from "@/components/ui/button"
 import {
@@ -32,9 +32,10 @@ import { MaterialList } from "@/components/material-list"
 import { PropertiesInspector } from "@/components/properties-inspector"
 import { Timeline } from "@/components/timeline"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { BONE_GROUPS, quatToEuler } from "@/lib/animation"
 import { autoClassifyMaterials, buildStyleGroups, styleGroupsToPresetMap } from "@/lib/materials"
-import type { AnimationClip, BoneKeyframe, MaterialPresetMap, MorphKeyframe } from "reze-engine"
+import type { AnimationClip, MaterialPresetMap } from "reze-engine"
 import { useStudioActions, useStudioSelector } from "@/context/studio-context"
 import { usePlayback, usePlaybackFrameRef } from "@/context/playback-context"
 import {
@@ -45,64 +46,20 @@ import {
 } from "@/components/engine-bridge"
 import { StudioStatusFooter, useStudioStatusActions } from "@/components/studio-status"
 import {
-  DEFAULT_STUDIO_CLIP_FRAMES,
+  clipRetainedForModel,
+  emptyStudioClip,
   interpolationTemplateForFrame,
   readLocalPoseAfterSeek,
   simplifyBoneTrack,
   upsertMorphKeyframeAtFrame,
 } from "@/lib/utils"
+import { clearDraft, flushDraftWrite, saveDraftSoon } from "@/lib/draft"
+import { clearModelUpload, saveModelUpload } from "@/lib/model-store"
 import packageJson from "../package.json"
 
 const APP_VERSION = packageJson.version
 const REPO_URL = "https://github.com/AmyangXYZ/reze-studio"
 const DOCS_README_URL = `${REPO_URL}/blob/main/README.md`
-
-function emptyStudioClip(): AnimationClip {
-  return { boneTracks: new Map(), morphTracks: new Map(), frameCount: DEFAULT_STUDIO_CLIP_FRAMES }
-}
-
-/** Keep only tracks whose bones/morphs exist on the new model. */
-function clipRetainedForModel(
-  clip: AnimationClip,
-  boneNames: ReadonlySet<string>,
-  morphNames: ReadonlySet<string>,
-): AnimationClip {
-  const boneTracks = new Map<string, BoneKeyframe[]>()
-  for (const [name, track] of clip.boneTracks) {
-    if (!boneNames.has(name) || !track?.length) continue
-    boneTracks.set(
-      name,
-      track.map((kf) => ({ ...kf })),
-    )
-  }
-  const morphTracks = new Map<string, MorphKeyframe[]>()
-  for (const [name, track] of clip.morphTracks) {
-    if (!morphNames.has(name) || !track?.length) continue
-    morphTracks.set(
-      name,
-      track.map((kf) => ({ ...kf })),
-    )
-  }
-  let inferred = 0
-  for (const t of boneTracks.values()) for (const k of t) inferred = Math.max(inferred, k.frame)
-  for (const t of morphTracks.values()) for (const k of t) inferred = Math.max(inferred, k.frame)
-  // IK state rides along, filtered the same way: a chain whose IK bone the new
-  // model does not have is as meaningless as a track for a bone it lacks.
-  // Rebuilding a clip field by field is how this data gets lost — a motion that
-  // switches leg IK off would silently start driving the legs again after a
-  // model swap, and export without the instruction it arrived with.
-  let ikTracks: AnimationClip["ikTracks"]
-  if (clip.ikTracks?.size) {
-    ikTracks = new Map()
-    for (const [name, track] of clip.ikTracks) {
-      if (boneNames.has(name) && track?.length) ikTracks.set(name, track.map((k) => ({ ...k })))
-    }
-    if (ikTracks.size === 0) ikTracks = undefined
-  }
-  const empty = boneTracks.size === 0 && morphTracks.size === 0
-  const end = empty ? Math.max(clip.frameCount, DEFAULT_STUDIO_CLIP_FRAMES) : Math.max(clip.frameCount, inferred)
-  return { boneTracks, morphTracks, ikTracks, frameCount: end }
-}
 
 function downloadBlob(blob: Blob, filename: string) {
   const a = document.createElement("a")
@@ -138,12 +95,12 @@ type StudioLeftPanelProps = {
   onMenubarValueChange: (v: string) => void
   studioReady: boolean
   resetStudioDocument: () => void
+  resetToDefaultModel: () => void
   exportClipVmd: () => void
   pmxPickFiles: File[] | null
   pmxPickPaths: string[]
-  pmxPickSelected: string
-  onPmxPickSelectedChange: (path: string) => void
-  onConfirmPmxPick: () => void
+  onPickPmxPath: (path: string) => void
+  onCancelPmxPick: () => void
   modelBones: string[]
   selectedGroup: string
   selectedBone: string | null
@@ -168,12 +125,12 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
   onMenubarValueChange,
   studioReady,
   resetStudioDocument,
+  resetToDefaultModel,
   exportClipVmd,
   pmxPickFiles,
   pmxPickPaths,
-  pmxPickSelected,
-  onPmxPickSelectedChange,
-  onConfirmPmxPick,
+  onPickPmxPath,
+  onCancelPmxPick,
   modelBones,
   selectedGroup,
   selectedBone,
@@ -193,7 +150,7 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
     <aside className="flex w-56 shrink-0 flex-col border-r border-border">
       <div className="shrink-0 border-b">
         <div className="pl-2 pt-0 flex items-center justify-between pb-1">
-          <h1 className="scroll-m-20 max-w-28 text-md font-extrabold leading-tight tracking-tight text-balance">
+          <h1 className="scroll-m-20 max-w-28 text-md font-medium leading-tight tracking-tight text-balance">
             REZE STUDIO
           </h1>
           <div className="flex shrink-0 items-center gap-0.5">
@@ -273,6 +230,17 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
                     Export VMD…
                   </MenubarItem>
                 </MenubarGroup>
+                <MenubarSeparator className="my-0.5" />
+                <MenubarGroup>
+                  <MenubarItem
+                    className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
+                    disabled={!studioReady}
+                    onSelect={resetToDefaultModel}
+                  >
+                    <RotateCcw className="size-3.5" />
+                    Reset to default model…
+                  </MenubarItem>
+                </MenubarGroup>
               </MenubarContent>
             </MenubarMenu>
             <MenubarMenu value="help">
@@ -327,31 +295,27 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
               </MenubarContent>
             </MenubarMenu>
           </Menubar>
-          {pmxPickFiles && pmxPickPaths.length > 1 ? (
-            <div className="mt-2 flex flex-col gap-1.5 rounded border border-border bg-muted/30 p-2 text-[10px]">
-              <span className="text-muted-foreground">Multiple .pmx files — choose one:</span>
-              <select
-                className="w-full rounded border border-border bg-background px-1 py-0.5 text-[11px]"
-                value={pmxPickSelected}
-                onChange={(e) => onPmxPickSelectedChange(e.target.value)}
-              >
+          <Dialog open={!!pmxPickFiles && pmxPickPaths.length > 1} onOpenChange={(o) => !o && onCancelPmxPick()}>
+            <DialogContent className="gap-2">
+              <DialogHeader>
+                <DialogTitle>Multiple .pmx files found</DialogTitle>
+                <DialogDescription>Choose one to load.</DialogDescription>
+              </DialogHeader>
+              <div className="flex max-h-64 flex-col gap-0.5 overflow-y-auto">
                 {pmxPickPaths.map((p) => (
-                  <option key={p} value={p}>
-                    {p}
-                  </option>
+                  <button
+                    key={p}
+                    type="button"
+                    title={p}
+                    className="truncate rounded-sm px-2 py-1.5 text-left text-[11px] hover:bg-accent hover:text-accent-foreground"
+                    onClick={() => onPickPmxPath(p)}
+                  >
+                    {p.split("/").pop() || p}
+                  </button>
                 ))}
-              </select>
-              <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                className="h-7 text-[11px]"
-                onClick={() => void onConfirmPmxPick()}
-              >
-                Load selected PMX
-              </Button>
-            </div>
-          ) : null}
+              </div>
+            </DialogContent>
+          </Dialog>
         </div>
       </div>
       <div className="flex min-h-0 flex-1 flex-col">
@@ -467,7 +431,6 @@ export function StudioPage() {
   /** Folder upload contained multiple `.pmx`; user picks one then clicks Load. */
   const [pmxPickFiles, setPmxPickFiles] = useState<File[] | null>(null)
   const [pmxPickPaths, setPmxPickPaths] = useState<string[]>([])
-  const [pmxPickSelected, setPmxPickSelected] = useState("")
   /** Radix menubar: which submenu is open (`""` = all closed). */
   const [menubarValue, setMenubarValue] = useState("")
   /** After a File menu action fires, Radix returns focus to the `File` trigger.
@@ -537,6 +500,24 @@ export function StudioPage() {
     }
     window.addEventListener("beforeunload", onBeforeUnload)
     return () => window.removeEventListener("beforeunload", onBeforeUnload)
+  }, [])
+
+  // ─── Persist the current draft (clip + display name) to localStorage ────
+  //     Covers every edit, undo/redo, and "New" — they all flow through this
+  //     same `clip`/`clipDisplayName` state. Debounced inside saveDraftSoon;
+  //     `null` only while the engine hasn't produced a clip yet (first mount,
+  //     before EngineBridge's boot effect settles).
+  useEffect(() => {
+    if (clip == null) return
+    saveDraftSoon(clipDisplayName, clip)
+  }, [clip, clipDisplayName])
+
+  // Debounced writes can lag up to 400ms behind what's on screen — flush on
+  // pagehide so closing the tab mid-edit doesn't drop the last keystroke.
+  useEffect(() => {
+    const onPageHide = () => flushDraftWrite()
+    window.addEventListener("pagehide", onPageHide)
+    return () => window.removeEventListener("pagehide", onPageHide)
   }, [])
 
   // ─── Keyboard shortcuts ──────────────────────────────────────────────
@@ -978,13 +959,17 @@ export function StudioPage() {
       try {
         const model = await engine.loadModel(instanceKey, { files, pmxFile })
         await new Promise((resolve) => requestAnimationFrame(resolve))
-        model.setName(sanitizeClipFilenameBase(stem))
+        const sanitizedStem = sanitizeClipFilenameBase(stem)
+        model.setName(sanitizedStem)
         applyLoadedPmxModel(model, instanceKey, stem, pmxFile.name, {
           clip: clipRef.current,
           currentFrame: currentFrameRef.current,
           playing: playRef.current,
           clipDisplayName: clipDisplayNameRef.current,
         })
+        // Fire-and-forget: persistence is a convenience, not a precondition
+        // for the upload succeeding in this session.
+        void saveModelUpload(files, pmxFile, sanitizedStem)
       } catch (e) {
         console.error("[pmx-upload] loadModel failed:", e)
         window.alert(e instanceof Error ? e.message : String(e))
@@ -1011,7 +996,6 @@ export function StudioPage() {
 
         setPmxPickFiles(null)
         setPmxPickPaths([])
-        setPmxPickSelected("")
 
         if (picked.status === "single") {
           await loadPmxFromFolder(picked.files, picked.pmxFile)
@@ -1019,7 +1003,6 @@ export function StudioPage() {
           pmxFolderFilesRef.current = picked.files
           setPmxPickFiles(picked.files)
           setPmxPickPaths(picked.pmxRelativePaths)
-          setPmxPickSelected(picked.pmxRelativePaths[0] ?? "")
         }
       } finally {
         setMenubarValue("")
@@ -1029,20 +1012,26 @@ export function StudioPage() {
     [loadPmxFromFolder, blurActiveElement],
   )
 
-  const onConfirmPmxPick = useCallback(async () => {
-    const files = pmxPickFiles
-    const path = pmxPickSelected
-    if (!files || !path) return
-    const pmxFile = pmxFileAtRelativePath(files, path)
-    if (!pmxFile) {
-      window.alert("Could not find the selected PMX file.")
-      return
-    }
-    await loadPmxFromFolder(files, pmxFile)
+  const onPickPmxPath = useCallback(
+    async (path: string) => {
+      const files = pmxPickFiles
+      if (!files) return
+      const pmxFile = pmxFileAtRelativePath(files, path)
+      if (!pmxFile) {
+        window.alert("Could not find the selected PMX file.")
+        return
+      }
+      setPmxPickFiles(null)
+      setPmxPickPaths([])
+      await loadPmxFromFolder(files, pmxFile)
+    },
+    [loadPmxFromFolder, pmxPickFiles],
+  )
+
+  const onCancelPmxPick = useCallback(() => {
     setPmxPickFiles(null)
     setPmxPickPaths([])
-    setPmxPickSelected("")
-  }, [loadPmxFromFolder, pmxPickFiles, pmxPickSelected])
+  }, [])
 
   const onPickVmdFile = useCallback(
     async (e: ChangeEvent<HTMLInputElement>) => {
@@ -1107,6 +1096,17 @@ export function StudioPage() {
     blurActiveElement()
   }, [replaceClip, setClipDisplayName, setSelectedBone, setSelectedMorph, setSelectedMaterial, setSelectedKeyframes, setCurrentFrame, setPlaying, blurActiveElement])
 
+  /** Discards the uploaded model + draft and reboots onto the bundled default —
+   *  a reload reruns EngineBridge's boot sequence rather than duplicating its
+   *  model/clip loading here. Rare and destructive, so it's confirmed first. */
+  const resetToDefaultModel = useCallback(() => {
+    if (!window.confirm("Reset to the default model? This clears your uploaded model and current draft."))
+      return
+    void clearModelUpload()
+    clearDraft()
+    window.location.reload()
+  }, [])
+
   return (
     <div className="flex h-screen w-full flex-col overflow-hidden text-foreground">
       <EngineBridge
@@ -1136,12 +1136,12 @@ export function StudioPage() {
           onMenubarValueChange={handleMenubarValueChange}
           studioReady={studioReady}
           resetStudioDocument={resetStudioDocument}
+          resetToDefaultModel={resetToDefaultModel}
           exportClipVmd={exportClipVmd}
           pmxPickFiles={pmxPickFiles}
           pmxPickPaths={pmxPickPaths}
-          pmxPickSelected={pmxPickSelected}
-          onPmxPickSelectedChange={setPmxPickSelected}
-          onConfirmPmxPick={onConfirmPmxPick}
+          onPickPmxPath={onPickPmxPath}
+          onCancelPmxPick={onCancelPmxPick}
           modelBones={sidebarBones}
           selectedGroup={selectedGroup}
           selectedBone={selectedBone}

@@ -17,6 +17,13 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* Heavier Figma-style drop shadow for floating panels / dialogs / popovers. */
+@utility shadow-float {
+  box-shadow:
+    0 20px 50px -12px rgb(0 0 0 / 0.7),
+    0 8px 20px -8px rgb(0 0 0 / 0.55);
+}
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);

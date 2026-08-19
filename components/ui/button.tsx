@@ -43,6 +43,7 @@ function Button({
   variant = "default",
   size = "default",
   asChild = false,
+  onClick,
   ...props
 }: React.ComponentProps<"button"> &
   VariantProps<typeof buttonVariants> & {
@@ -56,6 +57,13 @@ function Button({
       data-variant={variant}
       data-size={size}
       className={cn(buttonVariants({ variant, size }), className)}
+      onClick={(e: React.MouseEvent<HTMLButtonElement>) => {
+        // A mouse click leaves the button focused, so a later Space/Enter (meant for
+        // e.g. play/pause) would re-fire it instead. Keyboard activation (detail === 0)
+        // keeps focus, since that's the user still navigating by keyboard.
+        if (e.detail > 0) (e.currentTarget as HTMLElement).blur()
+        onClick?.(e)
+      }}
       {...props}
     />
   )

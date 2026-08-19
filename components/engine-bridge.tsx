@@ -22,7 +22,9 @@ import { useStudioActions, useStudioSelector } from "@/context/studio-context"
 import { usePlayback, usePlaybackFrameRef } from "@/context/playback-context"
 import { useStudioStatusActions } from "@/components/studio-status"
 import { autoClassifyMaterials } from "@/lib/materials"
-import { interpolationTemplateForFrame, readLocalPoseAfterSeek } from "@/lib/utils"
+import { clipRetainedForModel, emptyStudioClip, interpolationTemplateForFrame, readLocalPoseAfterSeek } from "@/lib/utils"
+import { loadDraft } from "@/lib/draft"
+import { clearModelUpload, loadModelUpload } from "@/lib/model-store"
 
 // ─── Constants shared with StudioPage file handlers ──────────────────────
 export const MODEL_PATH = "/models/塞尔凯特/塞尔凯特.pmx"
@@ -318,55 +320,130 @@ export function EngineBridge({
           setStatusFps(fps > 0 ? fps : null)
         })
 
-        if (USE_DEFAULT_ASSETS) try {
-          const model = await engine.loadModel("reze", MODEL_PATH)
-          if (disposed) return
-          // Hidden until the NPR graphs are compiled: the first VISIBLE frame
-          // wears the studio look, never the neutral default.
-          engine.setModelTransform("reze", { visible: false })
-          modelRef.current = model
+        // Push bone/morph/material names + status filename, then compile style
+        // groups before the render loop starts so the first frame uses the
+        // correct NPR graphs instead of the neutral default. autoStyleGroups
+        // applies the engine's maintained JP/CN/EN name hints, with our local
+        // keyword pass as overrides (explicit wins). StudioPage's materials
+        // effect reads the installed groups back into React state (idempotent).
+        // Shared between the bundled default and a restored upload below —
+        // only the source of the model and its status filename differ.
+        async function installModelIntoUi(instanceKey: string, model: Model, statusFileName: string) {
           const sk = model.getSkeleton().bones.map((b) => b.name)
           setPmxBoneNames(new Set(sk))
           setModelBoneOrder(sk)
           setMorphNames(model.getMorphing().morphs.map((m) => m.name))
           const materialNames = model.getMaterials().map((m) => m.name)
           setMaterialNames(materialNames)
-          setStatusPmxFileName(BUNDLED_PMX_FILENAME)
-          model.setMorphWeight("抗穿模", 0.5)
+          setStatusPmxFileName(statusFileName)
+          await engine.autoStyleGroups(instanceKey, autoClassifyMaterials(materialNames))
+        }
 
-          // Keep boot deterministic: guess + compile the style groups before the
-          // render loop starts so the first frame uses the correct NPR graphs
-          // instead of the neutral default. autoStyleGroups applies the engine's
-          // maintained JP/CN/EN name hints, with our local keyword pass as
-          // overrides (explicit wins). StudioPage's materials effect reads the
-          // installed groups back into React state (idempotent). Await so the
-          // graphs are installed before we render.
-          await engine.autoStyleGroups("reze", autoClassifyMaterials(materialNames))
+        // A model saved to IndexedDB by a previous session takes priority over
+        // the bundled default — restoring it is the whole point of persisting
+        // an upload. `restoredStem` doubles as the "did this succeed" flag
+        // below: only set once the restore actually lands a model.
+        let restoredStem: string | null = null
+        const storedModel = await loadModelUpload()
+        if (disposed) return
+
+        if (storedModel) {
+          const instanceKey = `u_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`
+          try {
+            const model = await engine.loadModel(instanceKey, { files: storedModel.files, pmxFile: storedModel.pmxFile })
+            if (disposed) return
+            // Hidden until the NPR graphs are compiled: the first VISIBLE frame
+            // wears the studio look, never the neutral default.
+            engine.setModelTransform(instanceKey, { visible: false })
+            model.setName(storedModel.stem)
+            modelRef.current = model
+            loadedModelNameRef.current = instanceKey
+            // `pmxFile.name` is the full stored path (see model-store.ts), not
+            // the bare filename a live folder pick's `File.name` would be —
+            // trim it back to match what the status bar shows for a fresh upload.
+            const statusFileName = storedModel.pmxFile.name.split("/").pop() || storedModel.pmxFile.name
+            await installModelIntoUi(instanceKey, model, statusFileName)
+            if (disposed) return
+            engine.setModelTransform(instanceKey, { visible: true })
+            restoredStem = storedModel.stem
+          } catch (e) {
+            console.warn("[boot] stored model failed to load — falling back to the bundled default", e)
+            void clearModelUpload()
+          }
+        }
+
+        if (!modelRef.current && USE_DEFAULT_ASSETS) try {
+          const model = await engine.loadModel("reze", MODEL_PATH)
           if (disposed) return
+          engine.setModelTransform("reze", { visible: false })
+          modelRef.current = model
+          await installModelIntoUi("reze", model, BUNDLED_PMX_FILENAME)
+          if (disposed) return
+          model.setMorphWeight("抗穿模", 0.5)
           engine.setModelTransform("reze", { visible: true })
-
         } catch {
           setEngineError(`Add model at public${MODEL_PATH}`)
         }
 
-        try {
-          await modelRef.current?.loadVmd(STUDIO_ANIM_NAME, VMD_PATH)
-          if (disposed) return
-          const c = modelRef.current?.getClip(STUDIO_ANIM_NAME)
-          if (c) {
+        // ─── Clip: a persisted draft takes priority over the bundled demo
+        //     motion, on whichever model just booted (custom or bundled). ───
+        const draft = loadDraft()
+        const model = modelRef.current
+        if (draft && model) {
+          try {
+            const boneSet = new Set(model.getSkeleton().bones.map((b) => b.name))
+            const morphSet = new Set(model.getMorphing().morphs.map((m) => m.name))
+            const clip = clipRetainedForModel(draft.clip, boneSet, morphSet)
+            model.loadClip(STUDIO_ANIM_NAME, clip)
             suppressClipDirtyRef.current += 1
-            replaceClip(c)
+            replaceClip(clip)
             documentDirtyRef.current = false
-            setClipDisplayName(sanitizeClipFilenameBase(fileStem(VMD_PATH)))
-            modelRef.current?.show(STUDIO_ANIM_NAME)
-            modelRef.current?.seek(0)
+            setClipDisplayName(draft.clipDisplayName)
+            model.show(STUDIO_ANIM_NAME)
+            model.seek(0)
             lastSeekFrameRef.current = 0
             requestAnimationFrame(() => engine.resetPhysics())
-            if (modelRef.current?.name === "reze") modelRef.current?.setMorphWeight("抗穿模", 0.5)
+            if (model.name === "reze") model.setMorphWeight("抗穿模", 0.5)
+          } catch (e) {
+            console.warn("[boot] stored draft failed to restore", e)
           }
-        } catch (e) {
-          console.warn(`VMD load failed — add file at public${VMD_PATH}`, e)
+        } else if (restoredStem === null) {
+          // No draft, and we're on the bundled model (no restored upload) —
+          // the pre-persistence behavior: load the demo motion so the studio
+          // never boots on a bare model.
+          try {
+            await model?.loadVmd(STUDIO_ANIM_NAME, VMD_PATH)
+            if (disposed) return
+            const c = model?.getClip(STUDIO_ANIM_NAME)
+            if (c) {
+              suppressClipDirtyRef.current += 1
+              replaceClip(c)
+              documentDirtyRef.current = false
+              setClipDisplayName(sanitizeClipFilenameBase(fileStem(VMD_PATH)))
+              model?.show(STUDIO_ANIM_NAME)
+              model?.seek(0)
+              lastSeekFrameRef.current = 0
+              requestAnimationFrame(() => engine.resetPhysics())
+              if (model?.name === "reze") model?.setMorphWeight("抗穿模", 0.5)
+            }
+          } catch (e) {
+            console.warn(`VMD load failed — add file at public${VMD_PATH}`, e)
+          }
+        } else if (model) {
+          // A restored custom model with no prior draft: start clean, same as
+          // a fresh folder upload with no previous timeline (see studio.tsx's
+          // applyLoadedPmxModel).
+          const fresh = emptyStudioClip()
+          model.loadClip(STUDIO_ANIM_NAME, fresh)
+          suppressClipDirtyRef.current += 1
+          replaceClip(fresh)
+          documentDirtyRef.current = false
+          setClipDisplayName(sanitizeClipFilenameBase(restoredStem))
+          model.show(STUDIO_ANIM_NAME)
+          model.seek(0)
+          lastSeekFrameRef.current = 0
         }
+
         setStudioReady(true)
         engineRef.current = engine
       } catch (e) {

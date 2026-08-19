@@ -3,6 +3,7 @@ import { Geist, Geist_Mono } from "next/font/google"
 import "./globals.css"
 import { Analytics } from "@vercel/analytics/next"
 import { CrashLogCapture } from "@/components/crash-log-capture"
+import { NoStickyFocus } from "@/components/no-sticky-focus"
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -30,6 +31,7 @@ export default function RootLayout({
       <body className={`${geistSans.variable} ${geistMono.variable} antialiased outline-none`}>
         {/* Capture starts here so a crash report carries what led up to it. */}
         <CrashLogCapture />
+        <NoStickyFocus />
         {children}
         <Analytics />
       </body>
