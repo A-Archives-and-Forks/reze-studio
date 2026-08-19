@@ -4,6 +4,7 @@ import "./globals.css"
 import { Analytics } from "@vercel/analytics/next"
 import { CrashLogCapture } from "@/components/crash-log-capture"
 import { NoStickyFocus } from "@/components/no-sticky-focus"
+import { NoNativeContextMenu } from "@/components/no-native-context-menu"
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -32,6 +33,7 @@ export default function RootLayout({
         {/* Capture starts here so a crash report carries what led up to it. */}
         <CrashLogCapture />
         <NoStickyFocus />
+        <NoNativeContextMenu />
         {children}
         <Analytics />
       </body>
