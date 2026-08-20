@@ -37,7 +37,7 @@ import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/componen
 import { useDefaultLayout } from "react-resizable-panels"
 import { BONE_GROUPS, quatToEuler } from "@/lib/animation"
 import { autoClassifyMaterials, buildStyleGroups, styleGroupsToPresetMap } from "@/lib/materials"
-import type { AnimationClip, MaterialPresetMap } from "reze-engine"
+import type { AnimationClip, MaterialPresetMap, VmdTrackSelection } from "reze-engine"
 import { useStudioActions, useStudioSelector } from "@/context/studio-context"
 import { usePlayback, usePlaybackFrameRef } from "@/context/playback-context"
 import {
@@ -98,7 +98,7 @@ type StudioLeftPanelProps = {
   studioReady: boolean
   resetStudioDocument: () => void
   resetToDefaultModel: () => void
-  exportClipVmd: () => void
+  exportClipVmd: (tracks?: VmdTrackSelection) => void
   pmxPickFiles: File[] | null
   pmxPickPaths: string[]
   onPickPmxPath: (path: string) => void
@@ -155,6 +155,10 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
     panelIds: ["bones", "morphs"],
   })
   const hasClip = clip != null
+  // A split export with nothing on that side would download an empty file —
+  // valid VMD, useless download. Grey it out instead.
+  const hasMotion = (clip?.boneTracks.size ?? 0) > 0
+  const hasMorphs = (clip?.morphTracks.size ?? 0) > 0
   return (
     <aside className="flex w-56 shrink-0 flex-col border-r border-line-strong">
       <div className="shrink-0 border-b border-line">
@@ -233,10 +237,26 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
                   <MenubarItem
                     className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
                     disabled={!studioReady || !hasClip}
-                    onSelect={exportClipVmd}
+                    onSelect={() => exportClipVmd("all")}
                   >
                     <FileDown className="size-3.5" />
                     Export VMD…
+                  </MenubarItem>
+                  <MenubarItem
+                    className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
+                    disabled={!studioReady || !hasMotion}
+                    onSelect={() => exportClipVmd("motion")}
+                  >
+                    <FileDown className="size-3.5" />
+                    Export motion only…
+                  </MenubarItem>
+                  <MenubarItem
+                    className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
+                    disabled={!studioReady || !hasMorphs}
+                    onSelect={() => exportClipVmd("morphs")}
+                  >
+                    <FileDown className="size-3.5" />
+                    Export morphs only…
                   </MenubarItem>
                 </MenubarGroup>
                 <MenubarSeparator className="my-0.5" />
@@ -1195,18 +1215,26 @@ export function StudioPage() {
     [syncStudioAfterNewClip, replaceClip, setClipDisplayName, blurActiveElement],
   )
 
-  const exportClipVmd = useCallback(() => {
-    const model = modelRef.current
-    if (!model || !clip) return
-    const base = sanitizeClipFilenameBase(clipDisplayName)
-    try {
-      model.loadClip(STUDIO_ANIM_NAME, clip)
-      const buf = model.exportVmd(STUDIO_ANIM_NAME)
-      downloadBlob(new Blob([buf], { type: "application/octet-stream" }), `${base}-export.vmd`)
-    } catch (err) {
-      window.alert(err instanceof Error ? err.message : String(err))
-    }
-  }, [clip, clipDisplayName])
+  /** Export the clip as VMD bytes. `tracks` splits the file the way MMD users
+   *  actually keep them: the dance and the expressions as separate files, or
+   *  both together. The suffix names which one you got — three downloads called
+   *  "dance-export.vmd" would be indistinguishable in a folder. */
+  const exportClipVmd = useCallback(
+    (tracks: VmdTrackSelection = "all") => {
+      const model = modelRef.current
+      if (!model || !clip) return
+      const base = sanitizeClipFilenameBase(clipDisplayName)
+      const suffix = tracks === "all" ? "export" : tracks
+      try {
+        model.loadClip(STUDIO_ANIM_NAME, clip)
+        const buf = model.exportVmd(STUDIO_ANIM_NAME, { tracks })
+        downloadBlob(new Blob([buf], { type: "application/octet-stream" }), `${base}-${suffix}.vmd`)
+      } catch (err) {
+        window.alert(err instanceof Error ? err.message : String(err))
+      }
+    },
+    [clip, clipDisplayName],
+  )
 
   const resetStudioDocument = useCallback(() => {
     const model = modelRef.current

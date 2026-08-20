@@ -1,10 +1,11 @@
 import type { NextConfig } from "next"
+// import { join } from "path"
 
 const nextConfig: NextConfig = {
   /* config options here */
   reactStrictMode: false,
   devIndicators: false,
-
+  // outputFileTracingRoot: join(__dirname, ".."),
   /**
    * Let browsers KEEP the bundled model + demo motion.
    *
