@@ -47,6 +47,8 @@ import {
   VMD_PATH,
   BUNDLED_PMX_FILENAME,
   AUDIO_PATH,
+  CAMERA_VMD_PATH,
+  MORPH_VMD_PATH,
   fileStem,
   sanitizeClipFilenameBase,
 } from "@/components/engine-bridge"
@@ -63,6 +65,7 @@ import {
 } from "@/lib/utils"
 import { clearDraft, flushDraftWrite, saveDraftSoon, type DraftExtras, type StoredTimelineView } from "@/lib/draft"
 import { clearModelUpload, saveModelUpload } from "@/lib/model-store"
+import { wasKeyboardInput } from "@/lib/last-input"
 import { decodeAudioPeaks } from "@/lib/audio"
 import { clearAudioUpload, loadAudioUpload, saveAudioUpload } from "@/lib/audio-store"
 import { AudioBridge } from "@/components/audio-bridge"
@@ -779,7 +782,11 @@ export function StudioPage() {
   const handleMenubarValueChange = useCallback(
     (v: string) => {
       setMenubarValue(v)
-      if (v === "") requestAnimationFrame(blurActiveElement)
+      // Radix's own focus return is now suppressed for pointer input (see
+      // lib/last-input.ts), so this only has to catch what that cannot: focus
+      // a menu ACTION moved somewhere unhelpful. Never on the keyboard path —
+      // blurring there strands the user on <body> with nothing to Tab from.
+      if (v === "" && !wasKeyboardInput()) requestAnimationFrame(blurActiveElement)
     },
     [blurActiveElement],
   )
@@ -1702,6 +1709,35 @@ export function StudioPage() {
     blurActiveElement()
   }, [replaceClip, setClipDisplayName, setSelectedBone, setSelectedMorph, setSelectedMaterial, setSelectedKeyframes, setIkEnabled, replaceCameraTrack, setCameraSelected, setCurrentFrame, setPlaying, blurActiveElement])
 
+  /** Decode a track and install it. Shared by the restore path and the bundled
+   *  default so the waveform is produced exactly one way. */
+  const installAudio = useCallback(async (name: string, file: Blob, objectUrl: string) => {
+    // decodeAudioData DETACHES the buffer it is handed, so it gets a copy — the
+    // original bytes are still backing the object URL that plays.
+    const decoded = await decodeAudioPeaks((await file.arrayBuffer()).slice(0))
+    if (!decoded) {
+      URL.revokeObjectURL(objectUrl)
+      return false
+    }
+    setAudio((prev) => {
+      if (prev?.url) URL.revokeObjectURL(prev.url)
+      return { name, peaks: decoded.peaks, duration: decoded.duration, url: objectUrl }
+    })
+    return true
+  }, [])
+
+  /** Fetch and install the bundled track, unconditionally. */
+  const installDefaultAudio = useCallback(async () => {
+    try {
+      const res = await fetch(AUDIO_PATH)
+      if (!res.ok) return
+      const blob = await res.blob()
+      await installAudio(AUDIO_PATH.split("/").pop() || "music", blob, URL.createObjectURL(blob))
+    } catch {
+      // No bundled track in this build — the timeline simply has no lane.
+    }
+  }, [installAudio])
+
   /** The harder of the two "start over" actions, and the reason they sit
    *  together in the menu: New project empties the DOCUMENT and keeps whatever
    *  model you loaded, this one throws the model away too and returns to the
@@ -1765,6 +1801,26 @@ export function StudioPage() {
         setClipDisplayName(sanitizeClipFilenameBase(fileStem(VMD_PATH)))
         syncStudioAfterNewClip(model)
       }
+      // The demo scene is four files, so a reset that stopped at the motion left
+      // most of it missing — no expressions, no shot, no music. Each in its own
+      // try: one absent file must not cost the others.
+      try {
+        await model.loadVmd(STUDIO_ANIM_NAME, MORPH_VMD_PATH, { tracks: "morphs" })
+        const withMorphs = model.getClip(STUDIO_ANIM_NAME)
+        if (withMorphs) replaceClip(withMorphs)
+      } catch {
+        /* no bundled expressions in this build */
+      }
+      try {
+        const camFrames = await VMDLoader.loadCamera(CAMERA_VMD_PATH)
+        if (camFrames.length > 0) replaceCameraTrack(camFrames)
+      } catch {
+        /* no bundled shot in this build */
+      }
+      // audioRef trails setAudio by a render; clear it here so the installer
+      // below is not looking at the track we just threw away.
+      audioRef.current = null
+      await installDefaultAudio()
       setEngineError(null)
     } catch (e) {
       console.error("[reset] failed to restore the default model:", e)
@@ -1783,27 +1839,11 @@ export function StudioPage() {
     setIkEnabled,
     replaceCameraTrack,
     setCameraSelected,
+    installDefaultAudio,
     setCurrentFrame,
     setPlaying,
     blurActiveElement,
   ])
-
-  /** Decode a track and install it. Shared by the restore path and the bundled
-   *  default so the waveform is produced exactly one way. */
-  const installAudio = useCallback(async (name: string, file: Blob, objectUrl: string) => {
-    // decodeAudioData DETACHES the buffer it is handed, so it gets a copy — the
-    // original bytes are still backing the object URL that plays.
-    const decoded = await decodeAudioPeaks((await file.arrayBuffer()).slice(0))
-    if (!decoded) {
-      URL.revokeObjectURL(objectUrl)
-      return false
-    }
-    setAudio((prev) => {
-      if (prev?.url) URL.revokeObjectURL(prev.url)
-      return { name, peaks: decoded.peaks, duration: decoded.duration, url: objectUrl }
-    })
-    return true
-  }, [])
 
   // Restore a previously imported track. Decoding again on every load rather
   // than storing peaks in the draft: the file is already in IndexedDB, decoding
@@ -1835,16 +1875,9 @@ export function StudioPage() {
         await new Promise((r) => setTimeout(r, 20))
       }
       if (audioRef.current) return
-      try {
-        const res = await fetch(AUDIO_PATH)
-        if (!res.ok) return
-        const blob = await res.blob()
-        await installAudio(AUDIO_PATH.split("/").pop() || "music", blob, URL.createObjectURL(blob))
-      } catch {
-        // No bundled track in this build — the timeline simply has no lane.
-      }
+      await installDefaultAudio()
     })()
-  }, [installAudio])
+  }, [installDefaultAudio])
 
   const { defaultLayout: viewportTimelineLayout, onLayoutChanged: onViewportTimelineLayoutChanged } = useDefaultLayout({
     id: "reze-studio.viewport-timeline",

@@ -5,6 +5,7 @@ import { CheckIcon, ChevronRightIcon, CircleIcon } from "lucide-react"
 import { Menubar as MenubarPrimitive } from "radix-ui"
 
 import { cn } from "@/lib/utils"
+import { preventFocusReturnOnPointer } from "@/lib/last-input"
 
 function Menubar({
   className,
@@ -75,6 +76,7 @@ function MenubarContent({
     <MenubarPortal>
       <MenubarPrimitive.Content
         data-slot="menubar-content"
+        onCloseAutoFocus={preventFocusReturnOnPointer}
         align={align}
         alignOffset={alignOffset}
         sideOffset={sideOffset}

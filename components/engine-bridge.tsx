@@ -32,6 +32,9 @@ export const VMD_PATH = "/animations/Classic.vmd"
 /** The shot and the song that ship with the demo motion — one scene, so they
  *  arrive together on a fresh boot rather than leaving the dance unscored. */
 export const CAMERA_VMD_PATH = "/animations/Classic_camera.vmd"
+/** The expression track, kept apart from the dance the way MMD keeps them —
+ *  it is laid OVER the motion rather than being part of it. */
+export const MORPH_VMD_PATH = "/animations/Classic_morph.vmd"
 export const AUDIO_PATH = "/audio/Classic.mp3"
 export const STUDIO_ANIM_NAME = "studio"
 export const BUNDLED_PMX_FILENAME = MODEL_PATH.replace(/^.*\//, "") || "model.pmx"
@@ -508,6 +511,16 @@ export function EngineBridge({
             }
           } catch (e) {
             console.warn(`VMD load failed — add file at public${VMD_PATH}`, e)
+          }
+          // The bundled expressions, laid over the motion just loaded. Its own
+          // try, like the shot below: one missing file must not cost the others.
+          try {
+            await model?.loadVmd(STUDIO_ANIM_NAME, MORPH_VMD_PATH, { tracks: "morphs" })
+            if (disposed) return
+            const withMorphs = model?.getClip(STUDIO_ANIM_NAME)
+            if (withMorphs) replaceClip(withMorphs)
+          } catch (e) {
+            console.warn(`Morph VMD load failed — add file at public${MORPH_VMD_PATH}`, e)
           }
           // The bundled shot. Its own try: a missing camera file should cost
           // the camera, not the motion that already loaded.
