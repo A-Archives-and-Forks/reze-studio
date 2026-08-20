@@ -17,7 +17,14 @@
 // no methods. serializeClip/deserializeClip round-trip through plain arrays
 // and objects so the stored shape doesn't depend on that.
 
-import type { AnimationClip, BoneInterpolation, BoneKeyframe, IkKeyframe, MorphKeyframe } from "reze-engine"
+import type {
+  AnimationClip,
+  BoneInterpolation,
+  BoneKeyframe,
+  CameraKeyframe,
+  IkKeyframe,
+  MorphKeyframe,
+} from "reze-engine"
 import { Quat, Vec3 } from "reze-engine"
 import type { SelectedKeyframe } from "@/context/studio-context"
 
@@ -68,6 +75,11 @@ export type DraftExtras = {
   timelineTab?: string
   /** Dopesheet/curve multi-selection. */
   selectedKeyframes?: SelectedKeyframe[]
+  /** The camera shot. Structured clone stores the Vec3s as plain objects and
+   *  the Uint8Array as itself; the boot restore rebuilds the vectors, since the
+   *  sampler does real vector maths on them. */
+  cameraTrack?: CameraKeyframe[]
+  cameraSelected?: boolean
   /** The IK toggle's own display state — the clip's `ikTracks` data (which
    *  drives this) is already part of `clip` itself and restores with it. */
   ikEnabled?: boolean

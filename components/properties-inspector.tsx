@@ -1,9 +1,9 @@
 "use client"
 
 import type { RefObject } from "react"
-import { memo, useCallback, useEffect, useRef, useState } from "react"
-import type { AnimationClip, BoneInterpolation, BoneKeyframe, Model } from "reze-engine"
-import { Quat, Vec3 } from "reze-engine"
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react"
+import type { AnimationClip, BoneInterpolation, BoneKeyframe, CameraKeyframe, Model } from "reze-engine"
+import { CameraAnimation, Quat, Vec3 } from "reze-engine"
 import { Button } from "@/components/ui/button"
 import {
   boneTitleSubtitle,
@@ -11,6 +11,11 @@ import {
   quatToEuler,
   ROT_CHANNELS,
   TRA_CHANNELS,
+  CAMERA_CHANNELS,
+  CAMERA_IP_TABS,
+  cameraChannelsForTab,
+  cameraIpChannelForTab,
+  cameraIpPair,
 } from "@/lib/animation"
 import { AxisSliderRow } from "@/components/axis-slider-row"
 import { InterpolationCurveEditor, PRESETS, type CurvePoint } from "@/components/interpolation-curve-editor"
@@ -84,6 +89,13 @@ function findKeyframeAt(clip: AnimationClip, bone: string, frame: number): BoneK
 }
 
 type IpTab = "rot" | "tx" | "ty" | "tz"
+
+const BONE_IP_TABS = [
+  { key: "rot", label: "Rotation" },
+  { key: "tx", label: "Trans X" },
+  { key: "ty", label: "Trans Y" },
+  { key: "tz", label: "Trans Z" },
+] as const
 
 function interpolationPairFromTab(kf: BoneKeyframe, tab: IpTab): [CurvePoint, CurvePoint] | null {
   let row: { x: number; y: number }[] | undefined
@@ -268,19 +280,33 @@ function useLiveActiveKeyframe(
 function useLiveMorphWeight(
   modelRef: RefObject<Model | null>,
   selectedMorph: string | null,
+  clip: AnimationClip | null,
 ): number | null {
   const playing = usePlaybackSelector((s) => s.playing)
   const currentFrame = usePlaybackSelector((s) => s.currentFrame)
   const [weight, setWeight] = useState<number | null>(null)
 
+  // `clip` is in the deps for a reason that is easy to miss: without it a
+  // commit never re-samples, so this kept handing back the PRE-EDIT weight.
+  // AxisSliderRow follows its `value` prop again the moment the drag ends, so
+  // the thumb snapped back to the old number while the timeline showed the new
+  // one. useLivePose (bones) has always taken `clip`; this was the odd one out.
   const sample = useCallback((): number | null => {
     const model = modelRef.current
     if (!model || !selectedMorph) return null
+    // Paused on a keyed frame, the stored weight is the truth — the engine's
+    // live value is whatever the last seek left, which can lag a commit by a
+    // frame. Same reasoning as useLivePose's keyframe snap.
+    if (!playing) {
+      const f = Math.round(Math.max(0, currentFrame))
+      const kfAt = clip?.morphTracks.get(selectedMorph)?.find((k) => k.frame === f)
+      if (kfAt) return kfAt.weight
+    }
     const morphing = model.getMorphing()
     const idx = morphing.morphs.findIndex((m) => m.name === selectedMorph)
     if (idx < 0) return null
     return model.getMorphWeights()[idx] ?? null
-  }, [modelRef, selectedMorph])
+  }, [modelRef, selectedMorph, clip, playing, currentFrame])
 
   const apply = useCallback((next: number | null) => {
     setWeight((prev) => (prev === next ? prev : next))
@@ -310,6 +336,7 @@ interface PropertiesInspectorProps {
   onDeleteSelectedKeyframes: () => void
   onSimplifySelectedBoneTrack: () => void
   onClearSelectedTrack: () => void
+  onClearCameraTrack: () => void
   timelineTab: string
   setTimelineTab: (tab: string) => void
   clipVersion: number
@@ -321,6 +348,7 @@ export const PropertiesInspector = memo(function PropertiesInspector({
   onDeleteSelectedKeyframes,
   onSimplifySelectedBoneTrack,
   onClearSelectedTrack,
+  onClearCameraTrack,
   timelineTab,
   setTimelineTab,
   clipVersion,
@@ -329,7 +357,9 @@ export const PropertiesInspector = memo(function PropertiesInspector({
   const selectedBone = useStudioSelector((s) => s.selectedBone)
   const selectedMorph = useStudioSelector((s) => s.selectedMorph)
   const selectedKeyframes = useStudioSelector((s) => s.selectedKeyframes)
-  const { commit } = useStudioActions()
+  const cameraTrack = useStudioSelector((s) => s.cameraTrack)
+  const cameraSelected = useStudioSelector((s) => s.cameraSelected)
+  const { commit, commitCamera } = useStudioActions()
   /** Read-only ref to the playhead. Subscribing here would re-render Properties
    *  every rAF tick during playback; instead we read .current inside callbacks
    *  and let the small <PlayheadFrameLabel/> + <InterpolationSection/> children
@@ -498,6 +528,23 @@ export const PropertiesInspector = memo(function PropertiesInspector({
     [selectedMorph, clip, commit, timelineTab, setTimelineTab, playbackFrameRef, modelRef],
   )
 
+  // The camera owns the whole pane when selected — it is not a bone with extra
+  // fields, and showing bone operations beside it would offer edits that do not
+  // apply to it.
+  if (cameraSelected) {
+    return (
+      <div className="space-y-0 text-[11px] leading-relaxed text-inherit">
+        <CameraSection
+          cameraTrack={cameraTrack}
+          commitCamera={commitCamera}
+          timelineTab={timelineTab}
+          setTimelineTab={setTimelineTab}
+          onClearCameraTrack={onClearCameraTrack}
+        />
+      </div>
+    )
+  }
+
   return (
     <div className="space-y-0 text-[11px] leading-relaxed text-inherit">
 
@@ -552,6 +599,7 @@ export const PropertiesInspector = memo(function PropertiesInspector({
           <LiveMorphSlider
             modelRef={modelRef}
             selectedMorph={selectedMorph}
+            clip={clip}
             disabled={!clip}
             applyMorphWeight={applyMorphWeight}
           />
@@ -699,15 +747,17 @@ function LiveBoneSliders({
 function LiveMorphSlider({
   modelRef,
   selectedMorph,
+  clip,
   disabled,
   applyMorphWeight,
 }: {
   modelRef: RefObject<Model | null>
   selectedMorph: string | null
+  clip: AnimationClip | null
   disabled: boolean
   applyMorphWeight: (w: number, mode: "preview" | "commit") => void
 }) {
-  const weight = useLiveMorphWeight(modelRef, selectedMorph)
+  const weight = useLiveMorphWeight(modelRef, selectedMorph, clip)
   return (
     <AxisSliderRow
       axis="W"
@@ -762,7 +812,15 @@ function InterpolationSection({
   // (last key with frame ≤ f). Reconciles only when the active key flips, not
   // every rAF tick — see `useLiveActiveKeyframe`.
   const kfSample = useLiveActiveKeyframe(clip, selectedBone)
-  const canEditIp = !!(clip && selectedBone && kfSample)
+  // A curve belongs to a keyframe, so editing one only means something when the
+  // playhead is ON a key. `kfSample` is the last key at OR BEFORE the playhead
+  // — right for reading a live value, wrong for editing: parked between two
+  // keys it let you edit the earlier one's curve while the timeline highlighted
+  // nothing, so the change landed somewhere you were not looking.
+  const currentFrame = usePlaybackSelector((st) => st.currentFrame)
+  const kfAtPlayhead =
+    kfSample && kfSample.frame === Math.round(Math.max(0, currentFrame)) ? kfSample : null
+  const canEditIp = !!(clip && selectedBone && kfAtPlayhead)
 
   // No useMemo: `patchKeyframeAt` mutates the keyframe in place and returns a
   // shallow-cloned clip, so `kfSample` keeps its identity across edits. Memo
@@ -771,70 +829,92 @@ function InterpolationSection({
   // and presets wouldn't redraw). Building a fresh pair every render is cheap
   // and guarantees the editor sees the live interpolation values.
   const ipPair =
-    (kfSample && interpolationPairFromTab(kfSample, ipTab)) ?? interpolationTemplateForChannel(ipTab)
+    (kfAtPlayhead && interpolationPairFromTab(kfAtPlayhead, ipTab)) ?? interpolationTemplateForChannel(ipTab)
 
   const applyInterpolation = useCallback(
     (p1: CurvePoint, p2: CurvePoint) => {
-      if (!clip || !selectedBone || !kfSample) return
-      const keyFrame = kfSample.frame
+      if (!clip || !selectedBone || !kfAtPlayhead) return
+      const keyFrame = kfAtPlayhead.frame
       commit(
         patchKeyframeAt(clip, selectedBone, keyFrame, (kf) => {
           kf.interpolation = mergeInterpolation(kf, ipTab, p1, p2)
         }),
       )
     },
-    [clip, selectedBone, ipTab, kfSample, commit],
+    [clip, selectedBone, ipTab, kfAtPlayhead, commit],
   )
 
+  return (
+    <InterpolationPanel
+      tabs={BONE_IP_TABS}
+      activeTab={ipTab}
+      onTabChange={(k) => setIpTab(k as IpTab)}
+      p1={ipPair[0]}
+      p2={ipPair[1]}
+      disabled={!canEditIp}
+      onChange={applyInterpolation}
+    />
+  )
+}
+
+/**
+ * The interpolation editor, shared by bones and the camera.
+ *
+ * Extracted so "the same panel" is true by construction rather than by two
+ * copies staying in sync — they had already drifted in their heading spacing
+ * and wrapper. What differs between callers is only WHICH curves exist (a bone
+ * has four, a camera six) and what a curve means; the controls are identical.
+ */
+function InterpolationPanel({
+  tabs,
+  activeTab,
+  onTabChange,
+  p1,
+  p2,
+  disabled,
+  onChange,
+}: {
+  tabs: readonly { key: string; label: string }[]
+  activeTab: string
+  onTabChange: (key: string) => void
+  p1: CurvePoint
+  p2: CurvePoint
+  disabled: boolean
+  onChange: (p1: CurvePoint, p2: CurvePoint) => void
+}) {
   return (
     <>
       <div className="mb-2 mt-3 text-[10px] font-medium uppercase tracking-[0.06em] text-muted-foreground">
         Interpolation
       </div>
       <div className="mb-1.5 flex flex-wrap gap-0.5">
-        {(
-          [
-            ["rot", "Rotation"],
-            ["tx", "Trans X"],
-            ["ty", "Trans Y"],
-            ["tz", "Trans Z"],
-          ] as const
-        ).map(([key, label]) => (
+        {tabs.map((t) => (
           <Button
-            key={key}
+            key={t.key}
             type="button"
-            variant={ipTab === key ? "secondary" : "ghost"}
+            variant={activeTab === t.key ? "secondary" : "ghost"}
             size="xs"
-            disabled={!canEditIp}
-            onClick={() => setIpTab(key)}
+            disabled={disabled}
+            onClick={() => onTabChange(t.key)}
             className="h-6 px-2 text-[9px] font-medium"
           >
-            {label}
+            {t.label}
           </Button>
         ))}
       </div>
       <div className="flex items-stretch gap-1.5" style={{ height: 164 }}>
-        <InterpolationCurveEditor
-          p1={ipPair[0]}
-          p2={ipPair[1]}
-          disabled={!canEditIp}
-          onChange={applyInterpolation}
-        />
+        <InterpolationCurveEditor p1={p1} p2={p2} disabled={disabled} onChange={onChange} />
         <div className="flex min-w-0 flex-1 flex-col gap-1">
           {PRESETS.map((pr) => {
-            const active =
-              pr.p1.x === ipPair[0].x &&
-              pr.p1.y === ipPair[0].y &&
-              pr.p2.x === ipPair[1].x &&
-              pr.p2.y === ipPair[1].y
+            const active = pr.p1.x === p1.x && pr.p1.y === p1.y && pr.p2.x === p2.x && pr.p2.y === p2.y
             return (
               <Button
                 key={pr.label}
                 type="button"
                 variant={active ? "secondary" : "outline"}
                 size="xs"
-                disabled={!canEditIp}
-                onClick={() => applyInterpolation(pr.p1, pr.p2)}
+                disabled={disabled}
+                onClick={() => onChange(pr.p1, pr.p2)}
                 className={cn(
                   "h-auto min-h-0 flex-1 truncate px-1 py-0.5 text-center text-[9.5px] font-medium leading-tight",
                   active
@@ -851,3 +931,336 @@ function InterpolationSection({
     </>
   )
 }
+
+// ─── Camera ─────────────────────────────────────────────────────────────
+
+/** Slider range per camera channel — each is in its own unit, so none of them
+ *  can share a range the way a bone's three rotation axes do. */
+const CAMERA_RANGES: Record<string, { min: number; max: number; decimals: number }> = {
+  cgx: { min: -30, max: 30, decimals: 2 },
+  cgy: { min: -30, max: 30, decimals: 2 },
+  cgz: { min: -30, max: 30, decimals: 2 },
+  crx: { min: -180, max: 180, decimals: 1 },
+  cry: { min: -180, max: 180, decimals: 1 },
+  crz: { min: -180, max: 180, decimals: 1 },
+  cds: { min: -100, max: 0, decimals: 2 },
+  cfv: { min: 1, max: 150, decimals: 0 },
+}
+
+/** A camera's pose at `frame`, as a keyframe ready to insert.
+ *
+ *  Uses the engine's own CameraAnimation so an inserted key sits exactly on the
+ *  curve the viewport is already showing — a second implementation of the same
+ *  beziers here would drift from it in the small, and the drift would only show
+ *  up as a camera that twitches when you key it. An empty track has no curve to
+ *  sample, so it falls back to a plain MMD-ish default shot. */
+function sampleCameraAt(track: readonly CameraKeyframe[], frame: number): CameraKeyframe {
+  const pose = track.length > 0 ? new CameraAnimation([...track]).sample(frame / 30) : null
+  if (!pose) {
+    return {
+      frame,
+      distance: -35,
+      target: new Vec3(0, 10, 0),
+      rotation: new Vec3(0, 0, 0),
+      fov: 30,
+    }
+  }
+  return {
+    frame,
+    distance: pose.distance,
+    target: new Vec3(pose.target.x, pose.target.y, pose.target.z),
+    rotation: new Vec3(pose.rotation.x, pose.rotation.y, pose.rotation.z),
+    // CameraAnimation hands fov back in radians; the file stores whole degrees.
+    fov: Math.round((pose.fov * 180) / Math.PI),
+  }
+}
+
+/** Slider groups, mirroring the bone inspector's Rotation / Translation split
+ *  — eight ungrouped rows showed "X Y Z" twice with nothing saying which was
+ *  which. */
+const CAMERA_GROUPS = [
+  { group: "rot" as const, label: "Rotation", stripPrefix: true },
+  { group: "tgt" as const, label: "Target", stripPrefix: true },
+  // Distance and FOV get no heading of their own: a one-row section whose title
+  // repeats the row's own label is a header saying nothing. They are separated
+  // from Target by space instead — enough to read as a break, without pretending
+  // to be two more groups.
+  { group: "dist" as const, label: null, stripPrefix: false },
+  { group: "fov" as const, label: null, stripPrefix: false },
+]
+
+/** The axis tab that shows exactly one channel — where a slider drag points
+ *  the timeline when the current view does not already include that channel. */
+const CAMERA_AXIS_TAB: Record<string, string> = {
+  crx: "camRx", cry: "camRy", crz: "camRz",
+  cgx: "camTx", cgy: "camTy", cgz: "camTz",
+  cds: "camDist", cfv: "camFov",
+}
+
+function withCameraIp(ip: Uint8Array | undefined, channel: number, p1: CurvePoint, p2: CurvePoint): Uint8Array {
+  const next = new Uint8Array(24)
+  if (ip && ip.length >= 24) next.set(ip.subarray(0, 24))
+  else for (let c = 0; c < 6; c++) next.set([20, 107, 20, 107], c * 4)
+  const b = channel * 4
+  next[b] = p1.x
+  next[b + 1] = p2.x
+  next[b + 2] = p1.y
+  next[b + 3] = p2.y
+  return next
+}
+
+/**
+ * The camera's pose at the playhead, and the curve leading into it.
+ *
+ * Edits the keyframe the playhead is ON (or the last one before it) — the same
+ * rule the bone inspector uses. A camera keyframe carries the whole pose, so
+ * unlike a bone there is no "this channel has no key here" case: if there is a
+ * keyframe at all, every channel is editable.
+ */
+const CameraSection = memo(function CameraSection({
+  cameraTrack,
+  commitCamera,
+  timelineTab,
+  setTimelineTab,
+  onClearCameraTrack,
+}: {
+  cameraTrack: readonly CameraKeyframe[]
+  commitCamera: ReturnType<typeof useStudioActions>["commitCamera"]
+  timelineTab: string
+  setTimelineTab: (t: string) => void
+  onClearCameraTrack: () => void
+}) {
+  const playhead = usePlaybackSelector((st) => st.currentFrame)
+  const frame = Math.round(Math.max(0, playhead))
+
+  // The keyframe AT the playhead, or null. Deliberately exact rather than
+  // "last one at or before": editing the previous key while the playhead sits
+  // between two of them is what made the sliders appear to move the wrong
+  // keyframe and the interpolation appear not to apply — the thing highlighted
+  // in the timeline and the thing being edited were different objects.
+  const keyAtPlayhead = useMemo(
+    () => cameraTrack.find((kf) => kf.frame === frame) ?? null,
+    [cameraTrack, frame],
+  )
+
+  // What the sliders READ: the real key when there is one, otherwise the shot's
+  // interpolated pose there — so the numbers always describe the frame you are
+  // looking at, whether or not it has been keyed yet. Sampled with the engine's
+  // own CameraAnimation rather than a second implementation of the same curves.
+  const displayed = useMemo(() => {
+    if (keyAtPlayhead) return keyAtPlayhead
+    return sampleCameraAt(cameraTrack, frame)
+  }, [keyAtPlayhead, cameraTrack, frame])
+
+  // Which of the six interpolation channels the curve editor is showing.
+  //
+  // Its OWN state, seeded from the timeline's tab but not chained to it.
+  // Deriving it meant picking a curve to ease here also yanked the timeline off
+  // whatever you were looking at — you clicked "Distance" to change its easing
+  // and lost your "All Rot" view. The two are related, not the same: one is
+  // which curve you are reading, the other is which curve you are easing.
+  const [ipChannel, setIpChannel] = useState(() => cameraIpChannelForTab(timelineTab))
+  // Following the timeline is still the right default when you deliberately
+  // switch tabs there — just not the other way round.
+  const lastTabRef = useRef(timelineTab)
+  useEffect(() => {
+    if (lastTabRef.current === timelineTab) return
+    lastTabRef.current = timelineTab
+    setIpChannel(cameraIpChannelForTab(timelineTab))
+  }, [timelineTab])
+
+  /** Edit the key at the playhead, creating it first if it does not exist —
+   *  the same "drag a slider and it keys" contract the bone sliders have. A new
+   *  key starts from the pose already showing there, so inserting one changes
+   *  nothing on its own; only the channel you dragged moves. */
+  const applyChannel = useCallback(
+    (channelKey: string, v: number) => {
+      const ch = CAMERA_CHANNELS.find((c) => c.key === channelKey)
+      if (!ch) return
+      commitCamera((track) => {
+        const existing = track.find((kf) => kf.frame === frame)
+        if (existing) {
+          return track.map((kf) => {
+            if (kf.frame !== frame) return kf
+            const next = { ...kf }
+            ch.set(next, v)
+            return next
+          })
+        }
+        const seeded = { ...sampleCameraAt(track, frame) }
+        ch.set(seeded, v)
+        return [...track, seeded]
+      })
+    },
+    [frame, commitCamera],
+  )
+
+  /** Point the timeline at the curve being dragged — on the FIRST tick, the
+   *  way a bone slider does it, so the view is already right while you drag
+   *  rather than snapping over once you let go. An "All" view already shows
+   *  this channel, so it is left alone. */
+  const syncTab = useCallback(
+    (channelKey: string) => {
+      const showing = cameraChannelsForTab(timelineTab).some((c) => c.key === channelKey)
+      if (showing) return
+      const want = CAMERA_AXIS_TAB[channelKey]
+      if (want) setTimelineTab(want)
+    },
+    [timelineTab, setTimelineTab],
+  )
+
+  /** Key the pose already showing at the playhead. Inserting changes nothing
+   *  on its own — that is the point: it pins the current shot so a later edit
+   *  elsewhere cannot drag this moment with it. */
+  const insertKey = useCallback(() => {
+    if (keyAtPlayhead) return
+    commitCamera((track) => [...track, sampleCameraAt(track, frame)])
+  }, [keyAtPlayhead, frame, commitCamera])
+
+  const deleteKey = useCallback(() => {
+    if (!keyAtPlayhead) return
+    commitCamera((track) => track.filter((kf) => kf.frame !== frame))
+  }, [keyAtPlayhead, frame, commitCamera])
+
+  const applyIp = useCallback(
+    (p1: CurvePoint, p2: CurvePoint) => {
+      if (!keyAtPlayhead) return
+      commitCamera((track) =>
+        track.map((kf) =>
+          kf.frame === frame
+            ? { ...kf, interpolation: withCameraIp(kf.interpolation, ipChannel, p1, p2) }
+            : kf,
+        ),
+      )
+    },
+    [keyAtPlayhead, frame, ipChannel, commitCamera],
+  )
+
+  const ipPair = cameraIpPair(keyAtPlayhead?.interpolation, ipChannel)
+
+  return (
+    <div className="space-y-0">
+      <section className="border-b border-line pb-3">
+        <div className="mb-2 flex items-start justify-between gap-2">
+          <div>
+            <div className="text-xs font-semibold text-inherit">Camera</div>
+            <div className="text-[10px] text-muted-foreground">
+              {cameraTrack.length === 0
+                ? "No keys — move a slider to key one"
+                : keyAtPlayhead
+                  ? `${cameraTrack.length} keys · editing key @ ${frame}`
+                  : `${cameraTrack.length} keys · none @ ${frame}`}
+            </div>
+          </div>
+        </div>
+
+        {CAMERA_GROUPS.map((group) => (
+          <div
+            key={group.group}
+            className={cn(
+              "mb-2 last:mb-0",
+              // The one gap that separates the headed groups above from the
+              // bare scalar rows below.
+              group.group === "dist" && "mt-4",
+            )}
+          >
+            {group.label ? (
+              <div className="mb-1 text-[10px] font-medium uppercase tracking-[0.06em] text-muted-foreground">
+                {group.label}
+              </div>
+            ) : null}
+            {CAMERA_CHANNELS.filter((c) => c.group === group.group).map((ch) => {
+              const r = CAMERA_RANGES[ch.key]
+              return (
+                <AxisSliderRow
+                  key={ch.key}
+                  axis={group.stripPrefix ? ch.label.replace(/^(Tgt|Rot)\./, "") : ch.label}
+                  color={ch.color}
+                  value={ch.get(displayed)}
+                  min={r.min}
+                  max={r.max}
+                  decimals={r.decimals}
+                  onChange={(v) => {
+                    applyChannel(ch.key, v)
+                    syncTab(ch.key)
+                  }}
+                  onCommit={(v) => applyChannel(ch.key, v)}
+                />
+              )
+            })}
+          </div>
+        ))}
+      </section>
+
+      <InterpolationPanel
+        tabs={CAMERA_IP_TABS.map((t) => ({ key: String(t.ip), label: t.label }))}
+        activeTab={String(ipChannel)}
+        onTabChange={(k) => setIpChannel(Number(k))}
+        p1={ipPair[0]}
+        p2={ipPair[1]}
+        disabled={!keyAtPlayhead}
+        onChange={applyIp}
+      />
+
+      <section className="space-y-2 pt-2.5">
+        <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Operations</div>
+        <div className="space-y-2.5">
+          <div className="flex items-center gap-1.5">
+            <span className="w-10 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">Key</span>
+            <Button
+              type="button"
+              variant="secondary"
+              size="xs"
+              className="h-6 flex-1 px-0.5 text-[11px]"
+              disabled={!!keyAtPlayhead}
+              onClick={insertKey}
+              title="Key the camera's current pose at the playhead"
+            >
+              Insert
+            </Button>
+            <Button
+              type="button"
+              variant="secondary"
+              size="xs"
+              className="h-6 flex-1 px-0.5 text-[11px]"
+              disabled={!keyAtPlayhead}
+              onClick={deleteKey}
+              title="Remove the camera keyframe at the playhead"
+            >
+              Delete
+            </Button>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="w-10 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">Track</span>
+            {/* Permanently disabled, and kept anyway: Simplify fits a curve
+                through dense keys, and a camera VMD is sparse by nature — its
+                keys ARE the cuts, so there is nothing to reduce. Dropping the
+                button would make this row one control wide and the whole
+                Operations block a different shape from the bone one. */}
+            <Button
+              type="button"
+              variant="secondary"
+              size="xs"
+              className="h-6 flex-1 px-0.5 text-[11px]"
+              disabled
+              title="Simplify applies to dense bone tracks — a camera's keys are its cuts"
+            >
+              Simplify
+            </Button>
+            <Button
+              type="button"
+              variant="secondary"
+              size="xs"
+              className="h-6 flex-1 px-0.5 text-[11px]"
+              disabled={cameraTrack.length === 0}
+              onClick={onClearCameraTrack}
+              title="Remove every camera keyframe"
+            >
+              Clear
+            </Button>
+          </div>
+        </div>
+      </section>
+    </div>
+  )
+})

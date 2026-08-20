@@ -16,7 +16,7 @@ import {
   type RefObject,
   type SetStateAction,
 } from "react"
-import { Engine, Model, Vec3 } from "reze-engine"
+import { Engine, Model, Vec3, VMDLoader } from "reze-engine"
 import type { AnimationClip, GizmoDragEvent } from "reze-engine"
 import { useStudioActions, useStudioSelector } from "@/context/studio-context"
 import { usePlayback, usePlaybackFrameRef } from "@/context/playback-context"
@@ -28,7 +28,11 @@ import { clearModelUpload, loadModelUpload } from "@/lib/model-store"
 
 // ─── Constants shared with StudioPage file handlers ──────────────────────
 export const MODEL_PATH = "/models/塞尔凯特/塞尔凯特.pmx"
-export const VMD_PATH = "/animations/miku.vmd"
+export const VMD_PATH = "/animations/Classic.vmd"
+/** The shot and the song that ship with the demo motion — one scene, so they
+ *  arrive together on a fresh boot rather than leaving the dance unscored. */
+export const CAMERA_VMD_PATH = "/animations/Classic_camera.vmd"
+export const AUDIO_PATH = "/audio/Classic.mp3"
 export const STUDIO_ANIM_NAME = "studio"
 export const BUNDLED_PMX_FILENAME = MODEL_PATH.replace(/^.*\//, "") || "model.pmx"
 
@@ -81,6 +85,11 @@ interface EngineBridgeProps {
   setMaterialNames: Dispatch<SetStateAction<string[]>>
   setEngineError: Dispatch<SetStateAction<string | null>>
   setStudioReady: Dispatch<SetStateAction<boolean>>
+  /** Fired once, only when booting with no saved draft — the moment the
+   *  bundled demo assets are the right thing to show. StudioPage uses it to
+   *  bring in the default track; a returning user's cleared music must not
+   *  come back on every reload. */
+  onFreshBoot?: () => void
 }
 
 export function EngineBridge({
@@ -101,11 +110,14 @@ export function EngineBridge({
   setMaterialNames,
   setEngineError,
   setStudioReady,
+  onFreshBoot,
 }: EngineBridgeProps) {
   const clip = useStudioSelector((s) => s.clip)
   const selectedBone = useStudioSelector((s) => s.selectedBone)
   const selectedMaterial = useStudioSelector((s) => s.selectedMaterial)
   const gizmoVisible = useStudioSelector((s) => s.gizmoVisible)
+  const cameraTrack = useStudioSelector((s) => s.cameraTrack)
+  const cameraVmdEnabled = useStudioSelector((s) => s.cameraVmdEnabled)
   const {
     commit,
     replaceClip,
@@ -116,11 +128,21 @@ export function EngineBridge({
     setGizmoVisible,
     setSelectedKeyframes,
     setIkEnabled,
+    replaceCameraTrack,
+    setCameraSelected,
   } = useStudioActions()
   const { currentFrame, setCurrentFrame, playing, setPlaying } = usePlayback()
   const playbackFrameRef = usePlaybackFrameRef()
   const { setPmxFileName: setStatusPmxFileName, setFps: setStatusFps } = useStudioStatusActions()
-  const frameCount = clip?.frameCount ?? 0
+  // Playback spans the whole document, not just the model's clip. A camera VMD
+  // carries no bone or morph frames, so with a camera-only load `clip` stays at
+  // its short default while the shot runs for thousands of frames — and every
+  // consumer below (the end-of-clip stop, the playhead clamp, the rAF loop)
+  // reads this. Without the camera's length in here the playhead stops dead
+  // partway through the shot, which also means it never leaves the visible
+  // window and the timeline never page-turns.
+  const lastCameraFrame = cameraTrack.length > 0 ? cameraTrack[cameraTrack.length - 1].frame : 0
+  const frameCount = Math.max(clip?.frameCount ?? 0, lastCameraFrame)
 
   // ─── Refs for the engine-supplied callbacks ──────────────────────────
   //     The Engine constructor takes `onRaycast` / `onGizmoDrag` once at
@@ -297,6 +319,21 @@ export function EngineBridge({
     engine.setSelectedMaterial(loadedModelNameRef.current, selectedMaterial)
   }, [selectedMaterial, engineRef, loadedModelNameRef])
 
+  // ─── Mirror the camera track → engine ────────────────────────────────
+  //     Every edit lands here: the array identity changes on commit, and a
+  //     drag bumps it too (Timeline commits on mouse-up), so the viewport
+  //     shows the shot being edited. An empty track hands the camera back to
+  //     orbit control, which is what loadCameraClip([]) does.
+  useEffect(() => {
+    const engine = engineRef.current
+    if (!engine) return
+    engine.loadCameraClip([...cameraTrack])
+    // loadCameraClip switches the camera on whenever a non-empty track lands;
+    // re-assert the user's choice so a re-commit mid-edit does not yank the
+    // viewport back off orbit.
+    engine.setCameraVmdEnabled(cameraVmdEnabled)
+  }, [cameraTrack, cameraVmdEnabled, engineRef])
+
   // ─── Engine init + initial model/VMD load ───────────────────────────
   useEffect(() => {
     const canvas = canvasRef.current
@@ -435,6 +472,19 @@ export function EngineBridge({
               engine.setCameraBeta(draft.camera.beta)
               engine.setCameraDistance(draft.camera.distance)
             }
+            setCameraSelected(draft.cameraSelected === true && (draft.cameraTrack?.length ?? 0) > 0)
+            if (draft.cameraTrack?.length) {
+              // Rebuild Vec3s: structured clone through IndexedDB drops the
+              // prototype, and the sampler does vector maths on these.
+              replaceCameraTrack(
+                draft.cameraTrack.map((kf) => ({
+                  ...kf,
+                  target: new Vec3(kf.target.x, kf.target.y, kf.target.z),
+                  rotation: new Vec3(kf.rotation.x, kf.rotation.y, kf.rotation.z),
+                  interpolation: kf.interpolation ? new Uint8Array(kf.interpolation) : undefined,
+                })),
+              )
+            }
             if (draft.timelineView) setTimelineView(draft.timelineView)
             requestAnimationFrame(() => engine.resetPhysics())
           } catch (e) {
@@ -459,6 +509,17 @@ export function EngineBridge({
           } catch (e) {
             console.warn(`VMD load failed — add file at public${VMD_PATH}`, e)
           }
+          // The bundled shot. Its own try: a missing camera file should cost
+          // the camera, not the motion that already loaded.
+          try {
+            const camFrames = await VMDLoader.loadCamera(CAMERA_VMD_PATH)
+            if (disposed) return
+            if (camFrames.length > 0) replaceCameraTrack(camFrames)
+          } catch (e) {
+            console.warn(`Camera VMD load failed — add file at public${CAMERA_VMD_PATH}`, e)
+          }
+          // And the song, which StudioPage owns (decode + object URL).
+          onFreshBoot?.()
         } else if (model) {
           // A restored custom model with no prior draft: start clean, same as
           // a fresh folder upload with no previous timeline (see studio.tsx's

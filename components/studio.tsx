@@ -14,8 +14,8 @@ import {
 } from "react"
 import Link from "next/link"
 import Image from "next/image"
-import { FilePlus2, FolderOpen, FileMusic, FileDown, RotateCcw, Check } from "lucide-react"
-import { Engine, Model, Vec3, parsePmxFolderInput, pmxFileAtRelativePath } from "reze-engine"
+import { FilePlus2, FolderOpen, FileMusic, FileDown, RotateCcw, Check, Video, Orbit, Eraser, Music } from "lucide-react"
+import { Engine, Model, Vec3, VMDLoader, VMDWriter, parsePmxFolderInput, pmxFileAtRelativePath } from "reze-engine"
 import { Button } from "@/components/ui/button"
 import {
   Menubar,
@@ -35,14 +35,18 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable"
 import { useDefaultLayout } from "react-resizable-panels"
-import { BONE_GROUPS, quatToEuler } from "@/lib/animation"
+import { BONE_GROUPS, CAMERA_DEFAULT_TAB, isCameraTab, quatToEuler } from "@/lib/animation"
 import { autoClassifyMaterials, buildStyleGroups, styleGroupsToPresetMap } from "@/lib/materials"
-import type { AnimationClip, MaterialPresetMap, VmdTrackSelection } from "reze-engine"
+import type { AnimationClip, CameraKeyframe, MaterialPresetMap, VmdTrackSelection } from "reze-engine"
 import { useStudioActions, useStudioSelector } from "@/context/studio-context"
 import { usePlayback, usePlaybackFrameRef } from "@/context/playback-context"
 import {
   EngineBridge,
   STUDIO_ANIM_NAME,
+  MODEL_PATH,
+  VMD_PATH,
+  BUNDLED_PMX_FILENAME,
+  AUDIO_PATH,
   fileStem,
   sanitizeClipFilenameBase,
 } from "@/components/engine-bridge"
@@ -54,14 +58,35 @@ import {
   readLocalPoseAfterSeek,
   simplifyBoneTrack,
   upsertMorphKeyframeAtFrame,
+  cn,
+  DEFAULT_STUDIO_CLIP_FRAMES,
 } from "@/lib/utils"
 import { clearDraft, flushDraftWrite, saveDraftSoon, type DraftExtras, type StoredTimelineView } from "@/lib/draft"
 import { clearModelUpload, saveModelUpload } from "@/lib/model-store"
+import { decodeAudioPeaks } from "@/lib/audio"
+import { clearAudioUpload, loadAudioUpload, saveAudioUpload } from "@/lib/audio-store"
+import { AudioBridge } from "@/components/audio-bridge"
 import packageJson from "../package.json"
 
 const APP_VERSION = packageJson.version
 const REPO_URL = "https://github.com/AmyangXYZ/reze-studio"
 const DOCS_README_URL = `${REPO_URL}/blob/main/README.md`
+
+/**
+ * How long the timeline should be once something has been cleared.
+ *
+ * `commit` only ever GROWS frameCount (clipAfterKeyframeEdit takes a max), which
+ * is right for editing — deleting one key should not shorten the export — but
+ * wrong after a clear: the length was describing content that no longer exists,
+ * so the ruler kept running over an empty timeline. Falls back to the default
+ * clip length rather than 0, so an emptied document still has somewhere to work.
+ */
+function durationAfterClear(clip: AnimationClip): number {
+  let last = 0
+  for (const t of clip.boneTracks.values()) for (const k of t) last = Math.max(last, k.frame)
+  for (const t of clip.morphTracks.values()) for (const k of t) last = Math.max(last, k.frame)
+  return last > 0 ? last : DEFAULT_STUDIO_CLIP_FRAMES
+}
 
 function downloadBlob(blob: Blob, filename: string) {
   const a = document.createElement("a")
@@ -73,11 +98,50 @@ function downloadBlob(blob: Blob, filename: string) {
 }
 
 /** Canvas + error overlay — playhead updates won’t reconcile this subtree. */
+type StudioViewportProps = {
+  engineError: string | null
+  /** Shown only once a shot exists — with no camera track there is nothing to
+   *  follow, and a toggle whose two states look identical is noise. */
+  hasCameraTrack: boolean
+  cameraVmdEnabled: boolean
+  onToggleCameraVmd: () => void
+}
+
 const StudioViewport = memo(
-  forwardRef<HTMLCanvasElement, { engineError: string | null }>(function StudioViewport({ engineError }, ref) {
+  forwardRef<HTMLCanvasElement, StudioViewportProps>(function StudioViewport(
+    { engineError, hasCameraTrack, cameraVmdEnabled, onToggleCameraVmd },
+    ref,
+  ) {
     return (
       <div className="relative min-h-0 flex-1 overflow-hidden">
         <canvas ref={ref} className="block h-full w-full touch-none" />
+        {/* Who is driving the view — the loaded shot, or your mouse. It floats
+            over the canvas rather than living in the timeline toolbar because
+            it is a property of what you are LOOKING at, not of the track you
+            happen to be editing, and it has to stay reachable from any tab. */}
+        {hasCameraTrack ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={onToggleCameraVmd}
+            title={
+              cameraVmdEnabled
+                ? "Following the camera track — click to orbit freely"
+                : "Free orbit — click to follow the camera track"
+            }
+            className={cn(
+              // Fixed square, icon only: the two states have to be the same
+              // size or the button moves under the cursor as you toggle it.
+              "absolute right-3 top-1/2 z-10 size-8 -translate-y-1/2 rounded-surface border p-0",
+              cameraVmdEnabled
+                ? "border-blue-400/30 bg-blue-400/[0.12] text-blue-400 hover:bg-blue-400/20"
+                : "border-line-strong bg-surface-raised text-muted-foreground hover:text-foreground",
+            )}
+          >
+            {cameraVmdEnabled ? <Video className="size-4" /> : <Orbit className="size-4" />}
+          </Button>
+        ) : null}
         {engineError ? (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-background/70 p-4 text-center text-sm text-muted-foreground">
             {engineError}
@@ -116,6 +180,21 @@ type StudioLeftPanelProps = {
   repoUrl: string
   appVersion: string
   onToggleIkEnabled: () => void
+  cameraTrack: readonly CameraKeyframe[]
+  cameraSelected: boolean
+  onSelectCamera: () => void
+  onPickCameraVmdFile: (e: ChangeEvent<HTMLInputElement>) => void
+  cameraVmdInputRef: RefObject<HTMLInputElement | null>
+  onPickMorphVmdFile: (e: ChangeEvent<HTMLInputElement>) => void
+  morphVmdInputRef: RefObject<HTMLInputElement | null>
+  exportCameraVmd: () => void
+  clearMotionTracks: () => void
+  clearMorphTracks: () => void
+  clearCameraTrack: () => void
+  onPickMusicFile: (e: ChangeEvent<HTMLInputElement>) => void
+  musicInputRef: RefObject<HTMLInputElement | null>
+  clearMusic: () => void
+  hasMusic: boolean
 }
 
 /** File menu + bone/morph lists — lives in page so the shell isn’t a separate layout file. */
@@ -147,6 +226,21 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
   repoUrl,
   appVersion,
   onToggleIkEnabled,
+  cameraTrack,
+  cameraSelected,
+  onSelectCamera,
+  onPickCameraVmdFile,
+  cameraVmdInputRef,
+  onPickMorphVmdFile,
+  morphVmdInputRef,
+  exportCameraVmd,
+  clearMotionTracks,
+  clearMorphTracks,
+  clearCameraTrack,
+  onPickMusicFile,
+  musicInputRef,
+  clearMusic,
+  hasMusic,
 }: StudioLeftPanelProps) {
   const clip = useStudioSelector((s) => s.clip)
   const ikEnabled = useStudioSelector((s) => s.ikEnabled)
@@ -163,9 +257,9 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
     <aside className="flex w-56 shrink-0 flex-col border-r border-line-strong">
       <div className="shrink-0 border-b border-line">
         <div className="pl-2 pt-0 flex items-center justify-between pb-1">
-          <h1 className="scroll-m-20 max-w-28 text-md font-medium leading-tight tracking-tight text-balance">
-            REZE STUDIO
-          </h1>
+        <h2 className="scroll-m-20 text-sm font-semibold tracking-tight first:mt-0">
+          REZE STUDIO
+        </h2>
           <div className="flex shrink-0 items-center gap-0.5">
             <Button variant="ghost" size="sm" asChild className="hover:bg-black hover:text-white rounded-full">
               <Link href="https://github.com/AmyangXYZ/reze-studio" target="_blank">
@@ -193,6 +287,33 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
             {...({ webkitdirectory: "", mozdirectory: "" } as InputHTMLAttributes<HTMLInputElement>)}
             onChange={onPickPmxFolder}
           />
+          <input
+            ref={morphVmdInputRef}
+            type="file"
+            accept=".vmd"
+            className="hidden"
+            tabIndex={-1}
+            aria-hidden
+            onChange={onPickMorphVmdFile}
+          />
+          <input
+            ref={musicInputRef}
+            type="file"
+            accept="audio/*"
+            className="hidden"
+            tabIndex={-1}
+            aria-hidden
+            onChange={onPickMusicFile}
+          />
+          <input
+            ref={cameraVmdInputRef}
+            type="file"
+            accept=".vmd"
+            className="hidden"
+            tabIndex={-1}
+            aria-hidden
+            onChange={onPickCameraVmdFile}
+          />
           <Menubar
             value={menubarValue}
             onValueChange={onMenubarValueChange}
@@ -210,7 +331,15 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
                     onSelect={resetStudioDocument}
                   >
                     <FilePlus2 className="size-3.5" />
-                    New
+                    New project
+                  </MenubarItem>
+                  <MenubarItem
+                    className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
+                    disabled={!studioReady}
+                    onSelect={resetToDefaultModel}
+                  >
+                    <RotateCcw className="size-3.5" />
+                    Reset project…
                   </MenubarItem>
                   <MenubarSeparator className="my-0.5" />
                   <MenubarItem
@@ -230,6 +359,29 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
                   >
                     <FileMusic className="size-3.5" />
                     Load VMD…
+                  </MenubarItem>
+                  <MenubarItem
+                    className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
+                    disabled={!studioReady}
+                    onSelect={() => morphVmdInputRef.current?.click()}
+                  >
+                    <FileMusic className="size-3.5" />
+                    Load morph VMD…
+                  </MenubarItem>
+                  <MenubarItem
+                    className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
+                    disabled={!studioReady}
+                    onSelect={() => cameraVmdInputRef.current?.click()}
+                  >
+                    <Video className="size-3.5" />
+                    Load camera VMD…
+                  </MenubarItem>
+                  <MenubarItem
+                    className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
+                    onSelect={() => musicInputRef.current?.click()}
+                  >
+                    <Music className="size-3.5" />
+                    Import music…
                   </MenubarItem>
                 </MenubarGroup>
                 <MenubarSeparator className="my-0.5" />
@@ -258,18 +410,51 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
                     <FileDown className="size-3.5" />
                     Export morphs only…
                   </MenubarItem>
+                  <MenubarItem
+                    className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
+                    disabled={!studioReady || cameraTrack.length === 0}
+                    onSelect={exportCameraVmd}
+                  >
+                    <Video className="size-3.5" />
+                    Export camera…
+                  </MenubarItem>
                 </MenubarGroup>
                 <MenubarSeparator className="my-0.5" />
                 <MenubarGroup>
                   <MenubarItem
                     className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
-                    disabled={!studioReady}
-                    onSelect={resetToDefaultModel}
+                    disabled={!studioReady || !hasMotion}
+                    onSelect={clearMotionTracks}
                   >
-                    <RotateCcw className="size-3.5" />
-                    Reset to default model…
+                    <Eraser className="size-3.5" />
+                    Clear motion
+                  </MenubarItem>
+                  <MenubarItem
+                    className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
+                    disabled={!studioReady || !hasMorphs}
+                    onSelect={clearMorphTracks}
+                  >
+                    <Eraser className="size-3.5" />
+                    Clear morphs
+                  </MenubarItem>
+                  <MenubarItem
+                    className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
+                    disabled={!studioReady || cameraTrack.length === 0}
+                    onSelect={clearCameraTrack}
+                  >
+                    <Eraser className="size-3.5" />
+                    Clear camera
+                  </MenubarItem>
+                  <MenubarItem
+                    className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
+                    disabled={!hasMusic}
+                    onSelect={clearMusic}
+                  >
+                    <Eraser className="size-3.5" />
+                    Clear music
                   </MenubarItem>
                 </MenubarGroup>
+
               </MenubarContent>
             </MenubarMenu>
             <MenubarMenu value="help">
@@ -394,6 +579,32 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
           </div>
         </ResizablePanel>
       </ResizablePanelGroup>
+      {/* Camera — a section you click, not a list you pick from. A scene has
+          exactly one camera, and its six channels are already the timeline's
+          tabs, so there is nothing here to enumerate. */}
+      <button
+        type="button"
+        onClick={onSelectCamera}
+        title={
+          cameraTrack.length === 0
+            ? "No camera motion yet — File › Load camera VMD…"
+            : "Edit the camera shot"
+        }
+        className={cn(
+          "flex shrink-0 items-center gap-1 border-t border-line px-3 py-2 text-left text-[11px] font-medium uppercase tracking-widest transition-colors",
+          cameraSelected
+            ? "bg-blue-400/[0.08] text-blue-400"
+            : "text-muted-foreground hover:bg-white/[0.03]",
+        )}
+      >
+        <span className="inline-flex w-1.5 shrink-0 text-[7px] leading-none normal-case" aria-hidden>
+          {cameraSelected ? "\u25cf" : ""}
+        </span>
+        <span className="min-w-0 flex-1 truncate">Camera</span>
+        <span className="shrink-0 font-mono text-[10px] tabular-nums normal-case tracking-normal">
+          {cameraTrack.length > 0 ? `[${cameraTrack.length}]` : "\u2014"}
+        </span>
+      </button>
     </aside>
   )
 })
@@ -413,6 +624,9 @@ export function StudioPage() {
   const selectedMaterial = useStudioSelector((s) => s.selectedMaterial)
   const selectedKeyframes = useStudioSelector((s) => s.selectedKeyframes)
   const ikEnabled = useStudioSelector((s) => s.ikEnabled)
+  const cameraTrack = useStudioSelector((s) => s.cameraTrack)
+  const cameraSelected = useStudioSelector((s) => s.cameraSelected)
+  const cameraVmdEnabled = useStudioSelector((s) => s.cameraVmdEnabled)
   const {
     commit,
     replaceClip,
@@ -422,6 +636,10 @@ export function StudioPage() {
     setSelectedMaterial,
     setSelectedKeyframes,
     setIkEnabled,
+    commitCamera,
+    replaceCameraTrack,
+    setCameraSelected,
+    setCameraVmdEnabled,
     undo,
     redo,
   } = useStudioActions()
@@ -436,6 +654,16 @@ export function StudioPage() {
   /** A restored draft's timeline view (zoom + scroll) — set once by
    *  EngineBridge's boot restore, handed to <Timeline> as `initialView`. */
   const [restoredTimelineView, setRestoredTimelineView] = useState<StoredTimelineView | undefined>(undefined)
+  /** The imported track. `peaks` is what the timeline draws, `url` is what the
+   *  audio element plays — kept apart because the peaks survive in the draft
+   *  while the object URL is per-session. */
+  const [audio, setAudio] = useState<{ name: string; peaks: number[]; duration: number; url: string | null } | null>(
+    null,
+  )
+  const audioRef = useRef(audio)
+  useEffect(() => {
+    audioRef.current = audio
+  }, [audio])
   /** Mirrors for use inside stable callbacks (draft persistence) without
    *  pulling these values into their dependency arrays. More mirrors sit
    *  next to selectedGroup/rightPanelTab/timelineTab below, once those exist. */
@@ -459,11 +687,22 @@ export function StudioPage() {
   useEffect(() => {
     ikEnabledRef.current = ikEnabled
   }, [ikEnabled])
+  const cameraTrackRef = useRef(cameraTrack)
+  useEffect(() => {
+    cameraTrackRef.current = cameraTrack
+  }, [cameraTrack])
+  const cameraSelectedRef = useRef(cameraSelected)
+  useEffect(() => {
+    cameraSelectedRef.current = cameraSelected
+  }, [cameraSelected])
   /** Latest timeline view reported by <Timeline> — read fresh at save time,
    *  same reasoning as the camera below (no owning state here, just a mirror). */
   const timelineViewRef = useRef<StoredTimelineView | undefined>(undefined)
 
   const vmdInputRef = useRef<HTMLInputElement>(null)
+  const cameraVmdInputRef = useRef<HTMLInputElement>(null)
+  const morphVmdInputRef = useRef<HTMLInputElement>(null)
+  const musicInputRef = useRef<HTMLInputElement>(null)
   const pmxFolderInputRef = useRef<HTMLInputElement>(null)
   /** Matches `engine.loadModel` name so `removeModel` can swap uploads without patching the engine. */
   const loadedModelNameRef = useRef("reze")
@@ -573,6 +812,24 @@ export function StudioPage() {
     clipDisplayNameRef.current = clipDisplayName
   }, [clipDisplayName])
 
+  // ─── The clip must be at least as long as the camera shot ───────────────
+  //     The engine samples the camera off the MODEL's animation clock (see
+  //     reze-engine's cameraClockTime), and that clock is clamped to the clip's
+  //     own frameCount. A camera VMD carries no bone or morph frames at all, so
+  //     a camera-only load leaves the clip at its short default and the shot
+  //     freezes there — playhead still travelling, picture stuck.
+  //
+  //     An effect rather than a step in the load handler: a restored draft, an
+  //     undo, and a clip swap all reach this state too, and only one of those
+  //     goes through the file picker. Self-limiting — after the commit the
+  //     condition is false, so it runs once per genuine shortfall.
+  useEffect(() => {
+    if (!clip || cameraTrack.length === 0) return
+    const lastFrame = cameraTrack[cameraTrack.length - 1].frame
+    if (lastFrame <= clip.frameCount) return
+    commit({ ...clip, frameCount: lastFrame })
+  }, [clip, cameraTrack, commit])
+
   // ─── Persist the current draft (clip + editor state) to IndexedDB ────────
   //     Covers every edit, undo/redo, "New", playhead scrub, and bone
   //     selection — they all flow through this same state. Debounced inside
@@ -598,6 +855,8 @@ export function StudioPage() {
       timelineTab: timelineTabRef.current,
       selectedKeyframes: selectedKeyframesRef.current,
       ikEnabled: ikEnabledRef.current,
+      cameraTrack: cameraTrackRef.current,
+      cameraSelected: cameraSelectedRef.current,
       camera: engine
         ? { alpha: engine.getCameraAlpha(), beta: engine.getCameraBeta(), distance: engine.getCameraDistance() }
         : undefined,
@@ -620,6 +879,8 @@ export function StudioPage() {
     timelineTab,
     selectedKeyframes,
     ikEnabled,
+    cameraTrack,
+    cameraSelected,
     buildDraftExtras,
   ])
 
@@ -688,13 +949,16 @@ export function StudioPage() {
     (b: string) => {
       setSelectedMorph(null)
       setSelectedMaterial(null)
+      setCameraSelected(false)
       setSelectedBone(b)
       setSelectedKeyframes([])
-      // Mirror of handleSelectMorph's setTimelineTab("morph") — a bone has no
-      // morph weight to plot, so leave the morph tab if that's where we were.
-      setTimelineTab((t) => (t === "morph" ? "allRot" : t))
+      // A bone has neither a morph weight nor a camera channel to plot, so any
+      // tab from those sets would leave the timeline showing nothing at all —
+      // no active tab, no curve. Snap back to the bone default; a tab that is
+      // already a bone tab is kept, so switching bones does not lose your view.
+      setTimelineTab((t) => (t === "morph" || isCameraTab(t) ? "allRot" : t))
     },
-    [setSelectedBone, setSelectedMorph, setSelectedMaterial, setSelectedKeyframes, setTimelineTab],
+    [setSelectedBone, setSelectedMorph, setSelectedMaterial, setCameraSelected, setSelectedKeyframes, setTimelineTab],
   )
 
   const revealBoneInList = useCallback(
@@ -733,11 +997,12 @@ export function StudioPage() {
     (name: string) => {
       setSelectedBone(null)
       setSelectedMaterial(null)
+      setCameraSelected(false)
       setSelectedMorph(name)
       setSelectedKeyframes([])
       setTimelineTab("morph")
     },
-    [setSelectedBone, setSelectedMorph, setSelectedMaterial, setSelectedKeyframes],
+    [setSelectedBone, setSelectedMorph, setSelectedMaterial, setCameraSelected, setSelectedKeyframes],
   )
 
   // Material selection is mutually exclusive with bone/morph. Click the same
@@ -1190,6 +1455,136 @@ export function StudioPage() {
     setPmxPickPaths([])
   }, [])
 
+  /** Load a camera VMD. Separate from "Load VMD…" on purpose: the camera block
+   *  lives at the END of the format, past bone/morph/light/self-shadow, and a
+   *  motion loader never reads it — a camera file put through the motion path
+   *  parses as an empty clip, which is exactly the "nothing appeared" the
+   *  camera was invisible for. */
+  const onPickCameraVmdFile = useCallback(
+    async (e: ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0]
+      e.target.value = ""
+      if (!file) return
+      try {
+        const frames = VMDLoader.loadCameraFromBuffer(await file.arrayBuffer())
+        if (frames.length === 0) {
+          window.alert("No camera track in that VMD — it may be a motion-only file.")
+          return
+        }
+        replaceCameraTrack(frames)
+        setCameraSelected(true)
+        setSelectedBone(null)
+        setSelectedMorph(null)
+        setSelectedMaterial(null)
+        setSelectedKeyframes([])
+        setTimelineTab(CAMERA_DEFAULT_TAB)
+      } catch (err) {
+        window.alert(err instanceof Error ? err.message : String(err))
+      } finally {
+        blurActiveElement()
+      }
+    },
+    [
+      replaceCameraTrack,
+      setCameraSelected,
+      setSelectedBone,
+      setSelectedMorph,
+      setSelectedMaterial,
+      setSelectedKeyframes,
+      blurActiveElement,
+    ],
+  )
+
+  const exportCameraVmd = useCallback(() => {
+    if (cameraTrack.length === 0) return
+    const base = sanitizeClipFilenameBase(clipDisplayName)
+    try {
+      const buf = new VMDWriter().writeCamera([...cameraTrack])
+      downloadBlob(new Blob([buf], { type: "application/octet-stream" }), `${base}-camera.vmd`)
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : String(err))
+    }
+  }, [cameraTrack, clipDisplayName])
+
+  /** Picking a camera channel selects the camera and points the timeline at
+   *  that curve — the same "select a thing, timeline follows" contract the bone
+   *  and morph lists have. */
+  const onSelectCamera = useCallback(
+    () => {
+      setCameraSelected(true)
+      setSelectedBone(null)
+      setSelectedMorph(null)
+      setSelectedMaterial(null)
+      setSelectedKeyframes([])
+      setTimelineTab((t) => (isCameraTab(t) ? t : CAMERA_DEFAULT_TAB))
+    },
+    [setCameraSelected, setSelectedBone, setSelectedMorph, setSelectedMaterial, setSelectedKeyframes],
+  )
+
+  /** Load only the expression half of a VMD, laid over whatever clip is open.
+   *  The engine's own `tracks: "morphs"` overwrites the morph tracks and grows
+   *  frameCount to cover — the bone half of the file is ignored. */
+  const onPickMorphVmdFile = useCallback(
+    async (e: ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0]
+      e.target.value = ""
+      const model = modelRef.current
+      if (!file || !model) return
+      const url = URL.createObjectURL(file)
+      try {
+        await model.loadVmd(STUDIO_ANIM_NAME, url, { tracks: "morphs" })
+        const c = model.getClip(STUDIO_ANIM_NAME)
+        if (c) {
+          replaceClip(c)
+          setSelectedKeyframes([])
+          setClipVersion((v) => v + 1)
+        }
+      } catch (err) {
+        window.alert(err instanceof Error ? err.message : String(err))
+      } finally {
+        URL.revokeObjectURL(url)
+        blurActiveElement()
+      }
+    },
+    [replaceClip, setSelectedKeyframes, blurActiveElement],
+  )
+
+  const onPickMusicFile = useCallback(
+    async (e: ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0]
+      e.target.value = ""
+      if (!file) return
+      try {
+        // Decode from a copy: decodeAudioData DETACHES the buffer it is given,
+        // and the same bytes are still needed for the object URL below.
+        const bytes = await file.arrayBuffer()
+        const decoded = await decodeAudioPeaks(bytes.slice(0))
+        if (!decoded) {
+          window.alert("Could not decode that audio file.")
+          return
+        }
+        setAudio((prev) => {
+          if (prev?.url) URL.revokeObjectURL(prev.url)
+          return { name: file.name, peaks: decoded.peaks, duration: decoded.duration, url: URL.createObjectURL(file) }
+        })
+        void saveAudioUpload(file.name, file)
+      } catch (err) {
+        window.alert(err instanceof Error ? err.message : String(err))
+      } finally {
+        blurActiveElement()
+      }
+    },
+    [blurActiveElement],
+  )
+
+  const clearMusic = useCallback(() => {
+    setAudio((prev) => {
+      if (prev?.url) URL.revokeObjectURL(prev.url)
+      return null
+    })
+    void clearAudioUpload()
+  }, [])
+
   const onPickVmdFile = useCallback(
     async (e: ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0]
@@ -1236,6 +1631,51 @@ export function StudioPage() {
     [clip, clipDisplayName],
   )
 
+  /** Clear one half of the clip, or the camera, without touching the others.
+   *
+   *  Separate from "New", which throws the whole document away: the common case
+   *  is keeping a dance and redoing the expressions, or dropping a camera you
+   *  imported to try. Undoable, unlike New — these go through `commit`, so a
+   *  mis-click is one ctrl-Z rather than a reload. */
+  const clearMotionTracks = useCallback(() => {
+    if (!clip || clip.boneTracks.size === 0) return
+    setSelectedKeyframes([])
+    setSelectedBone(null)
+    // ikTracks is bone state, so it goes with the motion.
+    const next = { ...clip, boneTracks: new Map(), ikTracks: undefined }
+    commit({ ...next, frameCount: durationAfterClear(next) })
+    // Nothing drives a bone once its track is gone, so the engine would hold
+    // the last pose it was given — the timeline empties and the model keeps
+    // standing in the deleted motion. Put it back on the bind pose explicitly.
+    modelRef.current?.resetAllBones()
+  }, [clip, commit, setSelectedKeyframes, setSelectedBone])
+
+  const clearMorphTracks = useCallback(() => {
+    if (!clip || clip.morphTracks.size === 0) return
+    setSelectedKeyframes([])
+    setSelectedMorph(null)
+    const next = { ...clip, morphTracks: new Map() }
+    commit({ ...next, frameCount: durationAfterClear(next) })
+    // Same reasoning as resetAllBones above: an unkeyed morph keeps whatever
+    // weight was last written to it, so a cleared expression stays on the face.
+    modelRef.current?.resetAllMorphs()
+  }, [clip, commit, setSelectedKeyframes, setSelectedMorph])
+
+  const clearCameraTrack = useCallback(() => {
+    if (cameraTrack.length === 0) return
+    setSelectedKeyframes([])
+    // Emptying the track hands the viewport back to orbit control (see
+    // EngineBridge's mirror), so the user is not left staring through a camera
+    // that no longer exists.
+    commitCamera([])
+    // The clip may have been stretched purely to cover the shot (see the
+    // "clip covers camera" effect); with the shot gone that length is not
+    // describing anything any more.
+    if (clip) commit({ ...clip, frameCount: durationAfterClear(clip) })
+    setCameraSelected(false)
+    setTimelineTab((t) => (isCameraTab(t) ? "allRot" : t))
+  }, [cameraTrack, clip, commit, commitCamera, setCameraSelected, setSelectedKeyframes])
+
   const resetStudioDocument = useCallback(() => {
     const model = modelRef.current
     if (!model) return
@@ -1250,23 +1690,161 @@ export function StudioPage() {
     setSelectedMaterial(null)
     setSelectedKeyframes([])
     setIkEnabled(true)
+    // The camera is half the document — a "New" that left the previous shot
+    // driving the viewport would not be a new project.
+    replaceCameraTrack([])
+    setCameraSelected(false)
+    setTimelineTab("allRot")
     // Bump after clearing selections so downstream effects don't see stale keyframes.
     setClipVersion((v) => v + 1)
     model.show(STUDIO_ANIM_NAME)
     model.seek(0)
     blurActiveElement()
-  }, [replaceClip, setClipDisplayName, setSelectedBone, setSelectedMorph, setSelectedMaterial, setSelectedKeyframes, setIkEnabled, setCurrentFrame, setPlaying, blurActiveElement])
+  }, [replaceClip, setClipDisplayName, setSelectedBone, setSelectedMorph, setSelectedMaterial, setSelectedKeyframes, setIkEnabled, replaceCameraTrack, setCameraSelected, setCurrentFrame, setPlaying, blurActiveElement])
 
-  /** Discards the uploaded model + draft and reboots onto the bundled default —
-   *  a reload reruns EngineBridge's boot sequence rather than duplicating its
-   *  model/clip loading here. Rare and destructive, so it's confirmed first. */
-  const resetToDefaultModel = useCallback(() => {
-    if (!window.confirm("Reset to the default model? This clears your uploaded model and current draft."))
+  /** The harder of the two "start over" actions, and the reason they sit
+   *  together in the menu: New project empties the DOCUMENT and keeps whatever
+   *  model you loaded, this one throws the model away too and returns to the
+   *  bundled default with its demo motion — the state a first visit shows.
+   *
+   *  Done in place rather than by reloading the page. A reload was the cheap
+   *  way to rerun the boot sequence, but it also tore down the WebGPU context
+   *  and re-fetched everything to reach a state the engine can just be told to
+   *  adopt. Destructive either way, so it is confirmed first. */
+  const resetToDefaultModel = useCallback(async () => {
+    if (
+      !window.confirm(
+        "Reset the project? This clears your uploaded model, motion, morphs and camera, and returns to the default model.",
+      )
+    )
       return
+    const engine = engineRef.current
+    if (!engine) return
+
     void clearModelUpload()
     void clearDraft()
-    window.location.reload()
+    void clearAudioUpload()
+    setAudio((prev) => {
+      if (prev?.url) URL.revokeObjectURL(prev.url)
+      return null
+    })
+
+    setPlaying(false)
+    setCurrentFrame(0)
+    setSelectedBone(null)
+    setSelectedMorph(null)
+    setSelectedMaterial(null)
+    setSelectedKeyframes([])
+    setIkEnabled(true)
+    replaceCameraTrack([])
+    setCameraSelected(false)
+    setSelectedGroup("All Bones")
+    setTimelineTab("allRot")
+
+    try {
+      engine.removeModel(loadedModelNameRef.current)
+    } catch {
+      /* removeModel is a no-op if the name is stale */
+    }
+    try {
+      const model = await engine.loadModel("reze", MODEL_PATH)
+      await new Promise((resolve) => requestAnimationFrame(resolve))
+      model.setName("reze")
+      // A null clip in the snapshot is what tells applyLoadedPmxModel not to
+      // carry the old timeline across — this is a reset, not a model swap.
+      applyLoadedPmxModel(model, "reze", fileStem(MODEL_PATH), BUNDLED_PMX_FILENAME, {
+        clip: null,
+        currentFrame: 0,
+        playing: false,
+        clipDisplayName: "clip",
+      })
+      await model.loadVmd(STUDIO_ANIM_NAME, VMD_PATH)
+      const c = model.getClip(STUDIO_ANIM_NAME)
+      if (c) {
+        replaceClip(c)
+        setClipDisplayName(sanitizeClipFilenameBase(fileStem(VMD_PATH)))
+        syncStudioAfterNewClip(model)
+      }
+      setEngineError(null)
+    } catch (e) {
+      console.error("[reset] failed to restore the default model:", e)
+      setEngineError(e instanceof Error ? e.message : String(e))
+    }
+    blurActiveElement()
+  }, [
+    applyLoadedPmxModel,
+    syncStudioAfterNewClip,
+    replaceClip,
+    setClipDisplayName,
+    setSelectedBone,
+    setSelectedMorph,
+    setSelectedMaterial,
+    setSelectedKeyframes,
+    setIkEnabled,
+    replaceCameraTrack,
+    setCameraSelected,
+    setCurrentFrame,
+    setPlaying,
+    blurActiveElement,
+  ])
+
+  /** Decode a track and install it. Shared by the restore path and the bundled
+   *  default so the waveform is produced exactly one way. */
+  const installAudio = useCallback(async (name: string, file: Blob, objectUrl: string) => {
+    // decodeAudioData DETACHES the buffer it is handed, so it gets a copy — the
+    // original bytes are still backing the object URL that plays.
+    const decoded = await decodeAudioPeaks((await file.arrayBuffer()).slice(0))
+    if (!decoded) {
+      URL.revokeObjectURL(objectUrl)
+      return false
+    }
+    setAudio((prev) => {
+      if (prev?.url) URL.revokeObjectURL(prev.url)
+      return { name, peaks: decoded.peaks, duration: decoded.duration, url: objectUrl }
+    })
+    return true
   }, [])
+
+  // Restore a previously imported track. Decoding again on every load rather
+  // than storing peaks in the draft: the file is already in IndexedDB, decoding
+  // is off-thread, and it keeps one source of truth for what the waveform shows.
+  const audioRestoredRef = useRef(false)
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      const stored = await loadAudioUpload()
+      if (cancelled) return
+      audioRestoredRef.current = true
+      if (!stored) return
+      await installAudio(stored.name, stored.file, URL.createObjectURL(stored.file))
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [installAudio])
+
+  /** The bundled track, on a first visit only — EngineBridge calls this from the
+   *  same branch that loads the demo motion and shot, so the three arrive as one
+   *  scene. Never on a return visit: a user who cleared the music must not find
+   *  it back after a reload. */
+  const loadDefaultAudio = useCallback(() => {
+    void (async () => {
+      // The restore pass decides whether there is already a track; wait for it
+      // rather than racing it and clobbering a real import.
+      for (let i = 0; i < 100 && !audioRestoredRef.current; i++) {
+        await new Promise((r) => setTimeout(r, 20))
+      }
+      if (audioRef.current) return
+      try {
+        const res = await fetch(AUDIO_PATH)
+        if (!res.ok) return
+        const blob = await res.blob()
+        await installAudio(AUDIO_PATH.split("/").pop() || "music", blob, URL.createObjectURL(blob))
+      } catch {
+        // No bundled track in this build — the timeline simply has no lane.
+      }
+    })()
+  }, [installAudio])
 
   const { defaultLayout: viewportTimelineLayout, onLayoutChanged: onViewportTimelineLayoutChanged } = useDefaultLayout({
     id: "reze-studio.viewport-timeline",
@@ -1293,6 +1871,7 @@ export function StudioPage() {
         setMaterialNames={setMaterialNames}
         setEngineError={setEngineError}
         setStudioReady={setStudioReady}
+        onFreshBoot={loadDefaultAudio}
       />
       <div className="flex min-h-0 flex-1">
         <StudioLeftPanel
@@ -1323,6 +1902,21 @@ export function StudioPage() {
           repoUrl={REPO_URL}
           appVersion={APP_VERSION}
           onToggleIkEnabled={toggleIkEnabled}
+          cameraTrack={cameraTrack}
+          cameraSelected={cameraSelected}
+          onSelectCamera={onSelectCamera}
+          onPickCameraVmdFile={onPickCameraVmdFile}
+          cameraVmdInputRef={cameraVmdInputRef}
+          onPickMorphVmdFile={onPickMorphVmdFile}
+          morphVmdInputRef={morphVmdInputRef}
+          exportCameraVmd={exportCameraVmd}
+          clearMotionTracks={clearMotionTracks}
+          clearMorphTracks={clearMorphTracks}
+          clearCameraTrack={clearCameraTrack}
+          onPickMusicFile={onPickMusicFile}
+          musicInputRef={musicInputRef}
+          clearMusic={clearMusic}
+          hasMusic={audio != null}
         />
 
         {/* Center: viewport + timeline, resizable */}
@@ -1333,7 +1927,13 @@ export function StudioPage() {
           className="min-h-0 min-w-0 flex-1"
         >
           <ResizablePanel id="viewport" defaultSize="76" minSize={100} className="flex min-h-0 flex-col">
-            <StudioViewport ref={canvasRef} engineError={engineError} />
+            <StudioViewport
+              ref={canvasRef}
+              engineError={engineError}
+              hasCameraTrack={cameraTrack.length > 0}
+              cameraVmdEnabled={cameraVmdEnabled}
+              onToggleCameraVmd={() => setCameraVmdEnabled((v) => !v)}
+            />
           </ResizablePanel>
           <ResizableHandle className="bg-line-strong" />
           {/* Timeline with dopesheet + value graph. Gated on studioReady so it
@@ -1349,6 +1949,8 @@ export function StudioPage() {
                 tab={timelineTab}
                 setTab={setTimelineTab}
                 playheadDrawRef={playheadDrawRef}
+                audioPeaks={audio?.peaks ?? null}
+                audioDuration={audio?.duration ?? 0}
                 initialView={restoredTimelineView}
                 onViewChange={onTimelineViewChange}
               />
@@ -1377,6 +1979,7 @@ export function StudioPage() {
                 onDeleteSelectedKeyframes={deleteSelectedKeyframes}
                 onSimplifySelectedBoneTrack={simplifySelectedBoneTrack}
                 onClearSelectedTrack={clearSelectedTrack}
+                onClearCameraTrack={clearCameraTrack}
                 timelineTab={timelineTab}
                 setTimelineTab={setTimelineTab}
                 clipVersion={clipVersion}
@@ -1398,6 +2001,7 @@ export function StudioPage() {
         </aside>
       </div>
 
+      <AudioBridge audioUrl={audio?.url ?? null} />
       <StudioStatusFooter
         clipDisplayName={clipDisplayName}
         hasClip={clip != null}

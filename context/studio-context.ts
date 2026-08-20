@@ -14,7 +14,7 @@ import {
   type ReactNode,
   type SetStateAction,
 } from "react"
-import type { AnimationClip } from "reze-engine"
+import type { AnimationClip, CameraKeyframe } from "reze-engine"
 import { clipAfterKeyframeEdit, cloneAnimationClip } from "@/lib/utils"
 
 const HISTORY_LIMIT = 100
@@ -43,6 +43,22 @@ export type StudioState = {
    *  `setSelectedBone` call re-shows the gizmo, including re-selecting the
    *  same bone — so the user never gets stuck with a hidden gizmo. */
   gizmoVisible: boolean
+  /** The camera shot, as its own track.
+   *
+   *  NOT part of `clip`: reze-engine's AnimationClip is per-model (bones,
+   *  morphs, IK) and a camera belongs to the scene, not to a character — the
+   *  VMD format keeps them in separate files for the same reason. So it lives
+   *  beside the clip and rides the same undo history.
+   *
+   *  Empty means no shot loaded; the viewport stays on orbit control. */
+  cameraTrack: CameraKeyframe[]
+  /** Camera is the selected editing target. Mutually exclusive with
+   *  bone/morph/material, the same way those are with each other. */
+  cameraSelected: boolean
+  /** Whether the loaded shot is driving the viewport, or the user is free to
+   *  orbit. Not part of the document — it is how you are LOOKING at the scene,
+   *  not what the scene is, so it never lands in undo. */
+  cameraVmdEnabled: boolean
   /** Whether IK solves for this clip — a document setting, not an engine-wide
    *  switch: toggling it rewrites the clip's own `ikTracks` (see
    *  studio.tsx's toggleIkEnabled), the same data a VMD's IK/display block
@@ -54,9 +70,16 @@ export type StudioState = {
    *  us push a *clean* snapshot onto history even though slider preview
    *  mutates `clip`'s keyframes in place between commits. */
   clipSnapshot: AnimationClip | null
-  past: AnimationClip[]
-  future: AnimationClip[]
+  /** The camera half of that same snapshot — see HistoryEntry. */
+  cameraSnapshot: CameraKeyframe[]
+  past: HistoryEntry[]
+  future: HistoryEntry[]
 }
+
+/** One undo step. The clip and the camera move together: an edit to either is
+ *  a change to the same document, and undoing a camera key should not silently
+ *  roll a bone edit back with it (or vice versa). */
+type HistoryEntry = { clip: AnimationClip | null; camera: CameraKeyframe[] }
 
 export type StudioClipCommit = Dispatch<SetStateAction<AnimationClip | null>>
 export type StudioKeyframesSetter = Dispatch<SetStateAction<SelectedKeyframe[]>>
@@ -72,6 +95,12 @@ export type StudioActions = {
   setSelectedMaterial: Dispatch<SetStateAction<string | null>>
   setGizmoVisible: Dispatch<SetStateAction<boolean>>
   setIkEnabled: Dispatch<SetStateAction<boolean>>
+  /** Commit a camera-track edit — undoable, like `commit` is for the clip. */
+  commitCamera: Dispatch<SetStateAction<CameraKeyframe[]>>
+  /** Load a camera track without recording history (file import, restore). */
+  replaceCameraTrack: (next: CameraKeyframe[]) => void
+  setCameraSelected: Dispatch<SetStateAction<boolean>>
+  setCameraVmdEnabled: Dispatch<SetStateAction<boolean>>
   setSelectedKeyframes: StudioKeyframesSetter
   undo: () => void
   redo: () => void
@@ -84,11 +113,22 @@ const INITIAL_STATE: StudioState = {
   selectedMorph: null,
   selectedMaterial: null,
   gizmoVisible: true,
+  cameraTrack: [],
+  cameraSelected: false,
+  cameraVmdEnabled: true,
   ikEnabled: true,
   selectedKeyframes: [],
   clipSnapshot: null,
+  cameraSnapshot: [],
   past: [],
   future: [],
+}
+
+/** Deep-enough copy of a camera track: the keyframe objects are replaced (a
+ *  drag mutates them in place) while target/rotation Vec3s are swapped whole by
+ *  the channel setters rather than mutated, so sharing them is safe. */
+function cloneCameraTrack(track: CameraKeyframe[]): CameraKeyframe[] {
+  return track.map((kf) => ({ ...kf }))
 }
 
 /** Resolve a `SetStateAction<T>` against the current value. */
@@ -120,13 +160,18 @@ function createStudioStore(): StudioStore {
     set({ ...state, [key]: next })
   }
 
-  /** Append snapshot to `past`, capping at HISTORY_LIMIT (drop oldest). */
-  const pushPast = (past: AnimationClip[], snap: AnimationClip | null): AnimationClip[] => {
-    if (snap == null) return past
+  /** Append a snapshot to `past`, capping at HISTORY_LIMIT (drop oldest).
+   *  A null clip with no camera keys is nothing to go back to, so it is not
+   *  recorded — but a null clip WITH a camera track still is: the camera is
+   *  half the document and can be edited on its own. */
+  const pushPast = (past: HistoryEntry[], snap: HistoryEntry): HistoryEntry[] => {
+    if (snap.clip == null && snap.camera.length === 0) return past
     const next = past.length >= HISTORY_LIMIT ? past.slice(past.length - HISTORY_LIMIT + 1) : past.slice()
     next.push(snap)
     return next
   }
+  /** The state's current snapshot, as one history entry. */
+  const snapshotOf = (st: StudioState): HistoryEntry => ({ clip: st.clipSnapshot, camera: st.cameraSnapshot })
 
   const actions: StudioActions = {
     commit: (payload) => {
@@ -136,7 +181,7 @@ function createStudioStore(): StudioStore {
           ...state,
           clip: null,
           clipSnapshot: null,
-          past: pushPast(state.past, state.clipSnapshot),
+          past: pushPast(state.past, snapshotOf(state)),
           future: [],
           selectedBone: null,
           selectedMorph: null,
@@ -149,7 +194,7 @@ function createStudioStore(): StudioStore {
         ...state,
         clip: finalNext,
         clipSnapshot: cloneAnimationClip(finalNext),
-        past: pushPast(state.past, state.clipSnapshot),
+        past: pushPast(state.past, snapshotOf(state)),
         future: [],
       })
     },
@@ -193,16 +238,51 @@ function createStudioStore(): StudioStore {
     setGizmoVisible: (payload) => update("gizmoVisible", payload),
     setIkEnabled: (payload) => update("ikEnabled", payload),
     setSelectedKeyframes: (payload) => update("selectedKeyframes", payload),
+    // Editing the shot puts you behind it. Both camera writers do this rather
+    // than the call sites, so no edit path can forget: dragging a keyframe in
+    // the timeline, nudging a slider in the inspector and importing a VMD all
+    // land here. Otherwise you tune a camera you are not looking through and
+    // the viewport never reacts — the edit appears to do nothing.
+    //
+    // Only when there is something to follow: an emptied track (Clear camera)
+    // must hand the viewport back to orbit, not point it at nothing.
+    commitCamera: (payload) => {
+      const next = resolve(payload, state.cameraTrack)
+      const sorted = [...next].sort((a, b) => a.frame - b.frame)
+      set({
+        ...state,
+        cameraTrack: sorted,
+        cameraSnapshot: cloneCameraTrack(sorted),
+        cameraVmdEnabled: sorted.length > 0 ? true : state.cameraVmdEnabled,
+        past: pushPast(state.past, snapshotOf(state)),
+        future: [],
+      })
+    },
+    replaceCameraTrack: (next) => {
+      const sorted = [...next].sort((a, b) => a.frame - b.frame)
+      set({
+        ...state,
+        cameraTrack: sorted,
+        cameraSnapshot: cloneCameraTrack(sorted),
+        cameraVmdEnabled: sorted.length > 0 ? true : state.cameraVmdEnabled,
+        past: [],
+        future: [],
+      })
+    },
+    setCameraSelected: (payload) => update("cameraSelected", payload),
+    setCameraVmdEnabled: (payload) => update("cameraVmdEnabled", payload),
     undo: () => {
       if (state.past.length === 0) return
       const popped = state.past[state.past.length - 1]
       const past = state.past.slice(0, -1)
-      const future = state.clipSnapshot != null ? [state.clipSnapshot, ...state.future] : state.future
+      const future = [snapshotOf(state), ...state.future]
       // popped is immutable; clone it so preview-time mutation can't poison history.
       set({
         ...state,
-        clip: cloneAnimationClip(popped),
-        clipSnapshot: popped,
+        clip: popped.clip ? cloneAnimationClip(popped.clip) : null,
+        clipSnapshot: popped.clip,
+        cameraTrack: cloneCameraTrack(popped.camera),
+        cameraSnapshot: popped.camera,
         past,
         future,
       })
@@ -211,11 +291,13 @@ function createStudioStore(): StudioStore {
       if (state.future.length === 0) return
       const popped = state.future[0]
       const future = state.future.slice(1)
-      const past = pushPast(state.past, state.clipSnapshot)
+      const past = pushPast(state.past, snapshotOf(state))
       set({
         ...state,
-        clip: cloneAnimationClip(popped),
-        clipSnapshot: popped,
+        clip: popped.clip ? cloneAnimationClip(popped.clip) : null,
+        clipSnapshot: popped.clip,
+        cameraTrack: cloneCameraTrack(popped.camera),
+        cameraSnapshot: popped.camera,
         past,
         future,
       })

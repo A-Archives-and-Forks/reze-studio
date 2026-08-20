@@ -1,8 +1,8 @@
 import { Vec3, Quat } from "reze-engine"
-import type { AnimationClip, BoneKeyframe, MorphKeyframe } from "reze-engine"
+import type { AnimationClip, BoneKeyframe, CameraKeyframe, MorphKeyframe } from "reze-engine"
 
 export { Vec3, Quat }
-export type { AnimationClip, BoneKeyframe, MorphKeyframe }
+export type { AnimationClip, BoneKeyframe, CameraKeyframe, MorphKeyframe }
 
 const DEG = 180 / Math.PI
 const RAD = Math.PI / 180
@@ -383,3 +383,173 @@ export const TRA_CHANNELS: Channel[] = [
 ]
 
 
+
+// ─── Camera channels ─────────────────────────────────────────────────────
+// A camera VMD is an ORBIT RIG, not a free camera: the file stores where the
+// camera looks (target), how it is turned (euler radians), how far back it sits
+// (distance, negative by MMD convention) and its field of view — the eye
+// position is derived from those, never stored. See reze-engine's
+// camera.ts:vmdEye().
+//
+// The tabs mirror a bone's: an "All" aggregate plus one per axis, for rotation
+// and for target, then the two scalars. Same shape, same hues — a camera is
+// another thing with three-axis channels, so it should not need its own
+// vocabulary.
+//
+// `ip` is which of the VMD's SIX interpolation channels the curve rides on:
+// 0=posX 1=posY 2=posZ 3=rotation 4=distance 5=fov. Note that all three euler
+// components share channel 3 — MMD eases a camera's whole rotation on one
+// curve, so yaw cannot be timed differently from pitch. That is the format, not
+// a simplification here: it is why the rotation axes get their own TABS (you
+// can edit each axis's values) but share one interpolation curve.
+
+export interface CameraChannel {
+  key: string
+  label: string
+  color: string
+  group: "rot" | "tgt" | "dist" | "fov"
+  /** Index into the 24-byte interpolation table's six channels. */
+  ip: number
+  get: (kf: CameraKeyframe) => number
+  set: (kf: CameraKeyframe, v: number) => void
+}
+
+const RAD2DEG = 180 / Math.PI
+const DEG2RAD = Math.PI / 180
+
+export const CAMERA_CHANNELS: CameraChannel[] = [
+  // Euler is stored in radians and shown in degrees — nobody authors a camera
+  // angle in radians, and every other rotation readout in this app is degrees.
+  {
+    key: "crx", label: "Rot.X", color: "#e25555", group: "rot", ip: 3,
+    get: (kf) => kf.rotation.x * RAD2DEG,
+    set: (kf, v) => { kf.rotation = new Vec3(v * DEG2RAD, kf.rotation.y, kf.rotation.z) },
+  },
+  {
+    key: "cry", label: "Rot.Y", color: "#44bb55", group: "rot", ip: 3,
+    get: (kf) => kf.rotation.y * RAD2DEG,
+    set: (kf, v) => { kf.rotation = new Vec3(kf.rotation.x, v * DEG2RAD, kf.rotation.z) },
+  },
+  {
+    key: "crz", label: "Rot.Z", color: "#4477dd", group: "rot", ip: 3,
+    get: (kf) => kf.rotation.z * RAD2DEG,
+    set: (kf, v) => { kf.rotation = new Vec3(kf.rotation.x, kf.rotation.y, v * DEG2RAD) },
+  },
+  {
+    key: "cgx", label: "Tgt.X", color: "#e2a055", group: "tgt", ip: 0,
+    get: (kf) => kf.target.x,
+    set: (kf, v) => { kf.target = new Vec3(v, kf.target.y, kf.target.z) },
+  },
+  {
+    key: "cgy", label: "Tgt.Y", color: "#55bba0", group: "tgt", ip: 1,
+    get: (kf) => kf.target.y,
+    set: (kf, v) => { kf.target = new Vec3(kf.target.x, v, kf.target.z) },
+  },
+  {
+    key: "cgz", label: "Tgt.Z", color: "#7755dd", group: "tgt", ip: 2,
+    get: (kf) => kf.target.z,
+    set: (kf, v) => { kf.target = new Vec3(kf.target.x, kf.target.y, v) },
+  },
+  {
+    key: "cds", label: "Dist", color: "#c084fc", group: "dist", ip: 4,
+    get: (kf) => kf.distance,
+    set: (kf, v) => { kf.distance = v },
+  },
+  {
+    key: "cfv", label: "FOV", color: "#22d3ee", group: "fov", ip: 5,
+    get: (kf) => kf.fov,
+    set: (kf, v) => { kf.fov = Math.max(1, Math.min(150, Math.round(v))) },
+  },
+]
+
+const CAM_CH = (key: string): CameraChannel => CAMERA_CHANNELS.find((c) => c.key === key)!
+
+/** Which curves a camera tab draws — an "All" tab draws its whole group, an
+ *  axis tab draws one, exactly like a bone's. */
+export function cameraChannelsForTab(tab: string): CameraChannel[] {
+  switch (tab) {
+    case "camAllRot": return CAMERA_CHANNELS.filter((c) => c.group === "rot")
+    case "camRx": return [CAM_CH("crx")]
+    case "camRy": return [CAM_CH("cry")]
+    case "camRz": return [CAM_CH("crz")]
+    case "camAllTgt": return CAMERA_CHANNELS.filter((c) => c.group === "tgt")
+    case "camTx": return [CAM_CH("cgx")]
+    case "camTy": return [CAM_CH("cgy")]
+    case "camTz": return [CAM_CH("cgz")]
+    case "camDist": return [CAM_CH("cds")]
+    case "camFov": return [CAM_CH("cfv")]
+    default: return []
+  }
+}
+
+/** The timeline's camera tabs, laid out like the bone set: aggregate, axes,
+ *  separator, aggregate, axes, separator, scalars. */
+export const CAMERA_TABS = [
+  { key: "camAllRot", label: "All Rot", color: null, sep: false },
+  { key: "camRx", label: "X", color: "#e25555", sep: false },
+  { key: "camRy", label: "Y", color: "#44bb55", sep: false },
+  { key: "camRz", label: "Z", color: "#4477dd", sep: false },
+  { key: "_camSep1", label: "", color: null, sep: true },
+  { key: "camAllTgt", label: "All Tgt", color: null, sep: false },
+  { key: "camTx", label: "X", color: "#e2a055", sep: false },
+  { key: "camTy", label: "Y", color: "#55bba0", sep: false },
+  { key: "camTz", label: "Z", color: "#7755dd", sep: false },
+  { key: "_camSep2", label: "", color: null, sep: true },
+  { key: "camDist", label: "Distance", color: "#c084fc", sep: false },
+  { key: "camFov", label: "FOV", color: "#22d3ee", sep: false },
+] as const
+
+/**
+ * The SIX curves the file actually eases, for the interpolation editor.
+ *
+ * Deliberately not the tab list above: the three rotation axes are three tabs
+ * but one bezier, so offering "Rot X / Rot Y / Rot Z" here would be three
+ * controls editing the same 4 bytes — three ways to be surprised.
+ */
+export const CAMERA_IP_TABS = [
+  // Same order as the timeline's own tabs — rotation, then target, then the
+  // scalars. The numbers are the VMD's channel indices, which run target-first;
+  // following those here would put the two tab strips in different orders for
+  // no reason a reader could see.
+  { ip: 3, label: "Rotation" },
+  { ip: 0, label: "Tgt X" },
+  { ip: 1, label: "Tgt Y" },
+  { ip: 2, label: "Tgt Z" },
+  { ip: 4, label: "Distance" },
+  { ip: 5, label: "FOV" },
+] as const
+
+/**
+ * A camera channel's two bezier control points.
+ *
+ * MMD packs each channel's four bytes CONTIGUOUSLY as [x1, x2, y1, y2] —
+ * unlike a bone's 64-byte table, which interleaves them. So channel c's points
+ * are (ip[4c], ip[4c+2]) and (ip[4c+1], ip[4c+3]). Falls back to the linear
+ * default for a hand-authored keyframe that carries no table.
+ */
+export function cameraIpPair(
+  ip: Uint8Array | undefined,
+  channel: number,
+): [{ x: number; y: number }, { x: number; y: number }] {
+  const b = channel * 4
+  if (!ip || ip.length < b + 4) return [{ x: 20, y: 20 }, { x: 107, y: 107 }]
+  return [
+    { x: ip[b], y: ip[b + 2] },
+    { x: ip[b + 1], y: ip[b + 3] },
+  ]
+}
+
+/** Which interpolation channel a timeline tab is easing. An "All Tgt" view
+ *  spans three of them, so it opens on the first. */
+export function cameraIpChannelForTab(tab: string): number {
+  const chans = cameraChannelsForTab(tab)
+  return chans.length > 0 ? chans[0].ip : 3
+}
+
+/** Default tab when the camera is selected — rotation shows all three euler
+ *  curves at once, which is the most of the shot you can see in one view. */
+export const CAMERA_DEFAULT_TAB = "camAllRot"
+
+export function isCameraTab(tab: string): boolean {
+  return tab.startsWith("cam")
+}

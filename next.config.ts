@@ -17,7 +17,7 @@ const nextConfig: NextConfig = {
   async headers() {
     return [
       {
-        source: "/:dir(models|animations)/:path*",
+        source: "/:dir(models|animations|audio)/:path*",
         headers: [{ key: "Cache-Control", value: "public, max-age=31536000, immutable" }],
       },
     ]

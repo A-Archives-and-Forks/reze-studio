@@ -23,19 +23,32 @@ import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { useStudioActions, useStudioSelector, type SelectedKeyframe } from "@/context/studio-context"
 import { usePlayback } from "@/context/playback-context"
-import type { AnimationClip, BoneKeyframe, MorphKeyframe } from "reze-engine"
+import type { AnimationClip, BoneKeyframe, CameraKeyframe, MorphKeyframe } from "reze-engine"
 import { bezierInterpolate } from "reze-engine"
 import {
   type Channel,
   ROT_CHANNELS,
   TRA_CHANNELS,
+  CAMERA_TABS,
+  CAMERA_CHANNELS,
+  CAMERA_DEFAULT_TAB,
+  cameraChannelsForTab,
+  cameraIpPair,
+  isCameraTab,
   boneDisplayLabel,
 } from "@/lib/animation"
 
 // ─── Timeline constants ─────────────────────────────────────────────────
 const DOPE_H = 34
+/** The music lane, under the dopesheet. Present only when a track is loaded —
+ *  an empty strip would cost the curves height for nothing. */
+const AUDIO_H = 26
 const RULER_H = 17
-const LABEL_W = 36
+// Wide enough for the longest lane name in the gutter ("Music" at 10px, right
+// aligned with 6px of padding). Every x-position in this canvas is derived from
+// it — the scroll origin, the curve clip, the zoom-to-fit maths — so widening
+// the gutter is this one number and nothing else.
+const LABEL_W = 42
 const DOT_R = 3.5
 const DIAMOND = 5
 const MIN_PX = 0.5
@@ -59,6 +72,11 @@ const C = {
   curveBg: "rgba(0,0,0,0)",
   ruler: "rgba(0,0,0,0)",
   rulerText: "#9ca3af",
+  // The same lavender-grey the unselected keyframe diamonds use. The waveform
+  // and the dopesheet are both reference material in the same gutter, so they
+  // read as one layer — and staying neutral keeps the red playhead legible
+  // where it crosses, which every saturated hue tried and failed to do.
+  audioWave: "rgba(170,170,195,0.55)",
   rulerTick: "#2a2a34",
   rulerMajor: "#3a3a48",
   grid: "#161620",
@@ -104,14 +122,43 @@ function padFrame4(n: number) {
 const ALL_CHANNELS: Channel[] = [...ROT_CHANNELS, ...TRA_CHANNELS]
 
 function getChannelsForTab(tab: string): Channel[] {
-  if (tab === "morph") return []
+  if (tab === "morph" || isCameraTab(tab)) return []
   if (tab === "allRot") return ROT_CHANNELS
   if (tab === "allTra") return TRA_CHANNELS
   const ch = ALL_CHANNELS.find((c) => c.key === tab)
   return ch ? [ch] : ROT_CHANNELS
 }
 
+/**
+ * No tick cap: the value has no natural limit, so ticks follow the view and
+ * keep labelling as you zoom out.
+ *
+ * The bounded cases are the ones where the range IS the value's range —
+ * rotation's ±180 and a morph weight's 0..1 — where a tick past the end would
+ * label a number the channel cannot hold. A translation, a camera distance and
+ * a field of view have no such edge; capping them just stopped the axis
+ * labelling halfway up the graph.
+ */
+const UNBOUNDED = { tickMin: -Infinity, tickMax: Infinity }
+
 function getAxisConfig(tab: string) {
+  // Camera channels each live in their own units — a target coordinate, an
+  // angle, a (negative) distance, a field of view — so they get their own
+  // ranges rather than borrowing a bone's.
+  if (tab === "camAllTgt" || tab === "camTx" || tab === "camTy" || tab === "camTz") {
+    // A world position has no natural bound — see UNBOUNDED below.
+    return { min: -30, max: 30, ...UNBOUNDED, unit: "", side: "left" as const, step: 10, subStep: 5 }
+  }
+  if (tab === "camAllRot" || tab === "camRx" || tab === "camRy" || tab === "camRz") {
+    return { min: -180, max: 180, tickMin: -180, tickMax: 180, unit: "\u00b0", side: "left" as const, step: 90, subStep: 45 }
+  }
+  if (tab === "camDist") {
+    // MMD distance is negative — the camera sits behind its target.
+    return { min: -80, max: 5, ...UNBOUNDED, unit: "", side: "left" as const, step: 20, subStep: 10 }
+  }
+  if (tab === "camFov") {
+    return { min: 0, max: 130, ...UNBOUNDED, unit: "\u00b0", side: "left" as const, step: 30, subStep: 15 }
+  }
   if (tab === "morph") {
     // Weight is [0, 1], but a keyframe sitting exactly on that boundary is
     // hard to click when the plotted range matches it exactly — a margin on
@@ -125,13 +172,15 @@ function getAxisConfig(tab: string) {
   if (isRot) {
     return { min: -90, max: 90, tickMin: -90, tickMax: 90, unit: "°", side: "left" as const, step: 30, subStep: 15 }
   } else {
-    return { min: -10, max: 10, tickMin: -10, tickMax: 10, unit: "", side: "left" as const, step: 5, subStep: 2.5 }
+    return { min: -10, max: 10, ...UNBOUNDED, unit: "", side: "left" as const, step: 5, subStep: 2.5 }
   }
 }
 
 const MORPH_COLOR = "#c084fc"
 
-const TABS = [
+type TabDef = { key: string; label: string; color: string | null; sep: boolean }
+
+const BONE_TABS: TabDef[] = [
   { key: "allRot", label: "All Rot", color: null, sep: false },
   { key: "rx", label: "X", color: C.rotX, sep: false },
   { key: "ry", label: "Y", color: C.rotY, sep: false },
@@ -141,9 +190,38 @@ const TABS = [
   { key: "tx", label: "X", color: C.traX, sep: false },
   { key: "ty", label: "Y", color: C.traY, sep: false },
   { key: "tz", label: "Z", color: C.traZ, sep: false },
-  { key: "_sep2", label: "", color: null, sep: true },
-  { key: "morph", label: "Morph", color: MORPH_COLOR, sep: false },
 ]
+
+// Colour-less, like "All Rot" and "All Trans": those three are the only tab in
+// their set, so a coloured chip would be keying a hue to nothing — there is no
+// sibling channel to tell it apart from. The curve itself still draws in
+// MORPH_COLOR; this is only the chip.
+const MORPH_TABS: TabDef[] = [{ key: "morph", label: "Weight", color: null, sep: false }]
+
+const CAM_TABS: TabDef[] = CAMERA_TABS.map((t) => ({ key: t.key, label: t.label, color: t.color, sep: t.sep }))
+
+/**
+ * The tabs for what is currently selected — the whole set is swapped, not
+ * greyed out.
+ *
+ * A morph has no rotation to plot and a bone has no weight; showing either as
+ * a disabled button is a row of dead controls that says nothing except "not
+ * this one". Swapping the set means every tab on screen is one you can press,
+ * and the count itself tells you what kind of thing you are editing.
+ */
+function tabsForSelection(kind: "bone" | "morph" | "camera"): TabDef[] {
+  if (kind === "camera") return CAM_TABS
+  if (kind === "morph") return MORPH_TABS
+  return BONE_TABS
+}
+
+/** The tab to fall back to when the selection changes out from under the
+ *  current one. */
+export function defaultTabForSelection(kind: "bone" | "morph" | "camera"): string {
+  if (kind === "camera") return CAMERA_DEFAULT_TAB
+  if (kind === "morph") return "morph"
+  return "allRot"
+}
 
 /** Scrub playhead 0…frameCount — track/thumb aligned with toolbar (Tailwind tokens). */
 function TransportFrameSlider({
@@ -359,6 +437,17 @@ interface TimelineCanvasProps {
   currentFrame: number
   selectedBone: string | null
   selectedMorph: string | null
+  /** The camera shot. Drawn instead of bone/morph curves while a camera tab is
+   *  active; empty means no shot loaded. */
+  cameraTrack: readonly CameraKeyframe[]
+  /** Timeline span — max of the clip's own length and the camera track's, so a
+   *  camera-only load still gets a full ruler. See Timeline's `fc`. */
+  frameCount: number
+  /** RMS columns of the imported track, 0..1, or null with none loaded. */
+  audioPeaks: readonly number[] | null
+  /** Track length in seconds — the waveform is drawn to real time, not to the
+   *  clip's length, so a song longer than the dance still reads correctly. */
+  audioDuration: number
   visibleBones: string[]
   selectedKeyframes: SelectedKeyframe[]
   tab: string
@@ -367,10 +456,12 @@ interface TimelineCanvasProps {
   onMoveDopeKeyframe: (
     boneRefs: Array<{ bone: string; kf: BoneKeyframe }>,
     morphRefs: Array<{ morph: string; kf: MorphKeyframe }>,
+    cameraRefs: CameraKeyframe[],
     toFrame: number,
   ) => void
   onMoveCurveKeyframe: (bone: string, kfRef: BoneKeyframe, channel: string, toFrame: number, dv: number) => void
   onMoveMorphKeyframe: (morph: string, kfRef: MorphKeyframe, toFrame: number, dw: number) => void
+  onMoveCameraKeyframe: (kfRef: CameraKeyframe, channelKey: string, toFrame: number, dv: number) => void
   /** Fired on mouseup/mouseleave at the end of a keyframe drag. Parent uses
    *  this to commit the clip once (for undo/redo + engine upload) instead of
    *  per-mousemove. */
@@ -392,6 +483,10 @@ function TimelineCanvas({
   currentFrame,
   selectedBone,
   selectedMorph,
+  cameraTrack,
+  frameCount,
+  audioPeaks,
+  audioDuration,
   visibleBones,
   selectedKeyframes,
   tab,
@@ -400,6 +495,7 @@ function TimelineCanvas({
   onMoveDopeKeyframe,
   onMoveCurveKeyframe,
   onMoveMorphKeyframe,
+  onMoveCameraKeyframe,
   onEndKeyframeDrag,
   playheadDrawRef,
   dragRedrawRef,
@@ -422,6 +518,9 @@ function TimelineCanvas({
     scrollX: number
     selectedBone: string | null
     selectedMorph: string | null
+    cameraTrack: readonly CameraKeyframe[] | null
+    frameCount: number
+    audioPeaks: readonly number[] | null
     visibleBones: readonly string[] | null
     selectedKeyframes: readonly SelectedKeyframe[] | null
     tab: string
@@ -435,6 +534,9 @@ function TimelineCanvas({
     scrollX: 0,
     selectedBone: null,
     selectedMorph: null,
+    cameraTrack: null,
+    frameCount: 0,
+    audioPeaks: null,
     visibleBones: null,
     selectedKeyframes: null,
     tab: "",
@@ -455,12 +557,19 @@ function TimelineCanvas({
     morphKfRef?: MorphKeyframe
     dopeBoneRefs?: Array<{ bone: string; kf: BoneKeyframe }>
     dopeMorphRefs?: Array<{ morph: string; kf: MorphKeyframe }>
+    cameraKfRef?: CameraKeyframe
+    dopeCameraRefs?: CameraKeyframe[]
     dopeFrame?: number
   } | null>(null)
 
   const getDopeFrames = useCallback(() => {
     const frames = new Map<number, number>()
-    if (tab === "morph" && selectedMorph) {
+    if (isCameraTab(tab)) {
+      // One diamond per camera keyframe. Every channel keys together in a
+      // camera VMD — a keyframe carries the whole pose — so the dopesheet is
+      // the shot's cut list regardless of which channel tab is showing.
+      for (const kf of cameraTrack) frames.set(kf.frame, 1)
+    } else if (tab === "morph" && selectedMorph) {
       const track = clip.morphTracks.get(selectedMorph)
       if (track) for (const kf of track) frames.set(kf.frame, 1)
     } else if (selectedBone) {
@@ -473,7 +582,7 @@ function TimelineCanvas({
       }
     }
     return frames
-  }, [clip, visibleBones, selectedBone, selectedMorph, tab])
+  }, [clip, visibleBones, selectedBone, selectedMorph, cameraTrack, tab])
 
   const draw = useCallback(() => {
     const el = canvasRef.current
@@ -511,13 +620,18 @@ function TimelineCanvas({
       cache.scrollX !== scrollX ||
       cache.selectedBone !== selectedBone ||
       cache.selectedMorph !== selectedMorph ||
+      cache.cameraTrack !== cameraTrack ||
+      cache.frameCount !== frameCount ||
+      cache.audioPeaks !== audioPeaks ||
       cache.visibleBones !== visibleBones ||
       cache.selectedKeyframes !== selectedKeyframes ||
       cache.tab !== tab ||
       cache.dragVersion !== dragVersionRef.current
 
     const ox = LABEL_W - scrollX
-    const dopeY = h - DOPE_H
+    const audioH = audioPeaks ? AUDIO_H : 0
+    const audioY = h - audioH
+    const dopeY = audioY - DOPE_H
     const curveTop = RULER_H
     const curveBot = dopeY - 1
     const curveH = curveBot - curveTop
@@ -572,7 +686,7 @@ function TimelineCanvas({
     const rulerTickTop = (maj: boolean) => (maj ? 2 : RULER_H - 4)
     const minRulerLabelGapPx = 32
     let lastRulerLabelX = -1e9
-    for (let f = 0; f <= clip.frameCount; f += fStep) {
+    for (let f = 0; f <= frameCount; f += fStep) {
       const x = ox + f * pxPerFrame
       if (x < LABEL_W - 10 || x > w + 10) continue
       const isM = f % fMajor === 0
@@ -649,7 +763,7 @@ function TimelineCanvas({
 
     // Vertical frame grid (skip x = LABEL_W — Y-axis above)
     ctx.lineWidth = 0.5
-    for (let f = 0; f <= clip.frameCount; f += fStep) {
+    for (let f = 0; f <= frameCount; f += fStep) {
       const x = toX(f)
       if (x <= LABEL_W || x > w) continue
       ctx.strokeStyle = f % fMajor === 0 ? C.axis : C.grid
@@ -664,8 +778,70 @@ function TimelineCanvas({
     ctx.beginPath()
     ctx.rect(LABEL_W, curveTop, w - LABEL_W, curveBot - curveTop)
     ctx.clip()
+    const isCamTab = isCameraTab(tab)
     const isMorphTab = tab === "morph"
-    if (isMorphTab) {
+    if (isCamTab) {
+      // ── Camera curves ──
+      // One line per channel under this tab: a single curve for target/
+      // distance/fov, three for "Rotation" (MMD eases all three euler
+      // components on one bezier, so they are shown, and keyed, together).
+      const camChannels = cameraChannelsForTab(tab)
+      if (cameraTrack.length > 0) {
+        for (const ch of camChannels) {
+          ctx.strokeStyle = ch.color
+          ctx.lineWidth = camChannels.length === 1 ? 2 : 1.5
+          ctx.beginPath()
+          for (let i = 0; i < cameraTrack.length; i++) {
+            const kf = cameraTrack[i]
+            const val = ch.get(kf)
+            const x = toX(kf.frame)
+            if (i === 0) {
+              ctx.moveTo(x, toY(val))
+              continue
+            }
+            // Sample the segment's bezier rather than joining the dots. A
+            // straight line here is what made the interpolation editor look
+            // broken: the curve on screen ignored the bytes it was writing.
+            // The incoming curve lives on the segment's END keyframe, which is
+            // the convention camera-animation.ts samples with.
+            const prev = cameraTrack[i - 1]
+            const prevVal = ch.get(prev)
+            const prevX = toX(prev.frame)
+            const cp = cameraIpPair(kf.interpolation, ch.ip)
+            const segs = Math.max(12, Math.ceil((x - prevX) / 3))
+            for (let sIdx = 1; sIdx <= segs; sIdx++) {
+              const t = sIdx / segs
+              const interp = bezierY(cp[0], cp[1], t)
+              ctx.lineTo(prevX + (x - prevX) * t, toY(prevVal + (val - prevVal) * interp))
+            }
+          }
+          ctx.stroke()
+
+          for (const kf of cameraTrack) {
+            const x = toX(kf.frame)
+            if (x < LABEL_W - 8 || x > w + 8) continue
+            const isSel = selectedKeyframes.some(
+              (sk) => sk.channel === ch.key && sk.frame === kf.frame,
+            )
+            ctx.beginPath()
+            ctx.arc(x, toY(ch.get(kf)), isSel ? DOT_R + 1.5 : DOT_R, 0, Math.PI * 2)
+            ctx.fillStyle = isSel ? C.keyDotSel : ch.color
+            ctx.fill()
+            if (isSel) {
+              ctx.strokeStyle = ch.color
+              ctx.lineWidth = 2
+              ctx.stroke()
+            }
+          }
+        }
+      } else {
+        ctx.fillStyle = C.label
+        ctx.font = `13px ${FONT}`
+        ctx.textAlign = "center"
+        ctx.textBaseline = "middle"
+        ctx.fillText("No keyframes \u2014 Camera", (w + LABEL_W) / 2, (curveTop + curveBot) / 2)
+      }
+    } else if (isMorphTab) {
       // ── Morph weight curve ──
       if (selectedMorph) {
         const morphKfs = clip.morphTracks.get(selectedMorph)
@@ -801,7 +977,7 @@ function TimelineCanvas({
 
     // Dope grid
     ctx.lineWidth = 0.3
-    for (let f = 0; f <= clip.frameCount; f += fStep) {
+    for (let f = 0; f <= frameCount; f += fStep) {
       const x = toX(f)
       if (x < LABEL_W || x > w) continue
       ctx.strokeStyle = C.grid
@@ -834,6 +1010,58 @@ function TimelineCanvas({
       ctx.restore()
     }
 
+    // ── Music lane ──
+    // A reference, not a track you edit: where the beats are is most of what
+    // syncing a dance to a song needs, and it is the one thing a frame number
+    // cannot tell you. Drawn to REAL TIME (its own duration at 30fps), not to
+    // the clip's length, so a song longer than the dance still reads correctly
+    // and its end lands where it actually falls.
+    if (audioPeaks && audioPeaks.length > 0) {
+      ctx.fillStyle = C.dopeBg
+      ctx.fillRect(0, audioY, w, audioH)
+      ctx.strokeStyle = C.dopeBorder
+      ctx.lineWidth = 1
+      ctx.beginPath()
+      ctx.moveTo(0, audioY + 0.5)
+      ctx.lineTo(w, audioY + 0.5)
+      ctx.stroke()
+
+      const mid = audioY + audioH / 2
+      const half = (audioH - 6) / 2
+      const audioEndFrame = audioDuration * 30
+      ctx.fillStyle = C.audioWave
+      // One bar per pixel column across the visible span, each reading the
+      // precomputed RMS array — sampling a fixed array beats re-walking the
+      // decoded buffer on every zoom step.
+      for (let px = LABEL_W; px < w; px++) {
+        const frame = (px - ox) / pxPerFrame
+        if (frame < 0 || frame > audioEndFrame) continue
+        const t = audioEndFrame > 0 ? frame / audioEndFrame : 0
+        const idx = Math.min(audioPeaks.length - 1, Math.max(0, Math.round(t * (audioPeaks.length - 1))))
+        const a = audioPeaks[idx] * half
+        if (a <= 0) continue
+        ctx.fillRect(px, mid - a, 1, a * 2)
+      }
+
+      // Its own label cell, like the dopesheet's.
+      ctx.fillStyle = C.dopeBg
+      ctx.fillRect(0, audioY, LABEL_W, audioH)
+      ctx.strokeStyle = C.border
+      ctx.lineWidth = 1
+      ctx.beginPath()
+      ctx.moveTo(LABEL_W - 0.5, audioY)
+      ctx.lineTo(LABEL_W - 0.5, audioY + audioH)
+      ctx.stroke()
+      // Same treatment as the dopesheet's "Keys" below it — they are two lane
+      // names in one gutter, and anything that differs between them reads as a
+      // difference in kind rather than in styling.
+      ctx.fillStyle = C.dopeLabel
+      ctx.font = `10px ${FONT}`
+      ctx.textAlign = "right"
+      ctx.textBaseline = "middle"
+      ctx.fillText("Music", LABEL_W - 6, mid + 1)
+    }
+
     // Dopesheet label
     ctx.fillStyle = C.dopeBg
     ctx.fillRect(0, dopeY, LABEL_W, DOPE_H)
@@ -856,6 +1084,9 @@ function TimelineCanvas({
       cache.scrollX = scrollX
       cache.selectedBone = selectedBone
       cache.selectedMorph = selectedMorph
+      cache.cameraTrack = cameraTrack
+      cache.frameCount = frameCount
+      cache.audioPeaks = audioPeaks
       cache.visibleBones = visibleBones
       cache.selectedKeyframes = selectedKeyframes
       cache.tab = tab
@@ -935,7 +1166,7 @@ function TimelineCanvas({
         ctx.fill()
       }
     }
-  }, [clip, pxPerFrame, yZoom, scrollX, selectedBone, selectedMorph, visibleBones, selectedKeyframes, tab, getDopeFrames])
+  }, [clip, pxPerFrame, yZoom, scrollX, selectedBone, selectedMorph, cameraTrack, frameCount, audioPeaks, audioDuration, visibleBones, selectedKeyframes, tab, getDopeFrames])
 
   // Layout-phase paint: `useEffect`+nested rAF ran after browser paint → playhead lagged 1–2 frames behind transport.
   // `currentFrame` is in deps (not in `draw`'s deps) so scrubbing + throttled
@@ -990,7 +1221,7 @@ function TimelineCanvas({
         my = e.clientY - rect.top
       const ox = LABEL_W - scrollX
       const h = el.clientHeight
-      const dopeY = h - DOPE_H
+      const dopeY = h - DOPE_H - (audioPeaks ? AUDIO_H : 0)
       const curveH = dopeY - 1 - RULER_H
       const ax = getAxisConfig(tab)
       const axCenter = (ax.min + ax.max) / 2
@@ -1002,7 +1233,7 @@ function TimelineCanvas({
 
       if (my < RULER_H) {
         const f = Math.round((mx - ox) / pxPerFrame)
-        return { zone: "ruler" as const, frame: Math.max(0, Math.min(clip.frameCount, f)) }
+        return { zone: "ruler" as const, frame: Math.max(0, Math.min(frameCount, f)) }
       }
 
       if (my >= dopeY) {
@@ -1014,10 +1245,21 @@ function TimelineCanvas({
             return { zone: "dope" as const, frame }
         }
         const f = Math.round((mx - ox) / pxPerFrame)
-        return { zone: "ruler" as const, frame: Math.max(0, Math.min(clip.frameCount, f)) }
+        return { zone: "ruler" as const, frame: Math.max(0, Math.min(frameCount, f)) }
       }
 
-      if (tab === "morph" && selectedMorph) {
+      if (isCameraTab(tab)) {
+        // Nearest dot wins across every channel drawn under this tab, so the
+        // three rotation curves are all grabbable where they overlap.
+        for (const ch of cameraChannelsForTab(tab)) {
+          for (const kf of cameraTrack) {
+            const x = toX(kf.frame)
+            const y = toY(ch.get(kf))
+            if (Math.hypot(mx - x, my - y) < DOT_R + 5)
+              return { zone: "camera-curve" as const, channel: ch.key, frame: kf.frame }
+          }
+        }
+      } else if (tab === "morph" && selectedMorph) {
         const morphKfs = clip.morphTracks.get(selectedMorph)
         if (morphKfs) {
           for (const kf of morphKfs) {
@@ -1042,9 +1284,9 @@ function TimelineCanvas({
       }
 
       const f = Math.round((mx - ox) / pxPerFrame)
-      return { zone: "ruler" as const, frame: Math.max(0, Math.min(clip.frameCount, f)) }
+      return { zone: "ruler" as const, frame: Math.max(0, Math.min(frameCount, f)) }
     },
-    [clip, pxPerFrame, yZoom, scrollX, selectedBone, selectedMorph, tab, getDopeFrames],
+    [clip, pxPerFrame, yZoom, scrollX, selectedBone, selectedMorph, cameraTrack, frameCount, audioPeaks, tab, getDopeFrames],
   )
 
   const onMouseDown = useCallback(
@@ -1059,7 +1301,11 @@ function TimelineCanvas({
         // Capture references to all keyframes (across bones/morphs) sharing this frame
         const dopeBoneRefs: Array<{ bone: string; kf: BoneKeyframe }> = []
         const dopeMorphRefs: Array<{ morph: string; kf: MorphKeyframe }> = []
-        if (tab === "morph" && selectedMorph) {
+        const dopeCameraRefs: CameraKeyframe[] = []
+        if (isCameraTab(tab)) {
+          const kf = cameraTrack.find((k) => k.frame === hit.frame)
+          if (kf) dopeCameraRefs.push(kf)
+        } else if (tab === "morph" && selectedMorph) {
           const track = clip.morphTracks.get(selectedMorph)
           const kf = track?.find((k) => k.frame === hit.frame)
           if (kf) dopeMorphRefs.push({ morph: selectedMorph, kf })
@@ -1076,7 +1322,19 @@ function TimelineCanvas({
           startX: e.clientX,
           dopeBoneRefs,
           dopeMorphRefs,
+          dopeCameraRefs,
           dopeFrame: hit.frame,
+        }
+      } else if (hit.zone === "camera-curve") {
+        const kfRef = cameraTrack.find((k) => k.frame === hit.frame)
+        if (!kfRef) return
+        onSelectKeyframe({ frame: hit.frame, channel: hit.channel, type: "curve" }, e.shiftKey)
+        drag.current = {
+          type: "camera-curve",
+          channel: hit.channel,
+          cameraKfRef: kfRef,
+          startX: e.clientX,
+          startY: e.clientY,
         }
       } else if (hit.zone === "morph-curve") {
         const track = clip.morphTracks.get(hit.morph)
@@ -1111,7 +1369,7 @@ function TimelineCanvas({
         }
       }
     },
-    [hitTest, onSetCurrentFrame, onSelectKeyframe, clip, tab, selectedBone, selectedMorph, visibleBones],
+    [hitTest, onSetCurrentFrame, onSelectKeyframe, clip, tab, selectedBone, selectedMorph, cameraTrack, visibleBones],
   )
 
   const onMouseMove = useCallback(
@@ -1124,7 +1382,7 @@ function TimelineCanvas({
 
       if (drag.current?.type === "scrub") {
         const f = Math.round((mx - ox) / pxPerFrame)
-        onSetCurrentFrame(Math.max(0, Math.min(clip.frameCount, f)))
+        onSetCurrentFrame(Math.max(0, Math.min(frameCount, f)))
         return
       }
       if (drag.current?.type === "dope") {
@@ -1132,9 +1390,30 @@ function TimelineCanvas({
         const df = Math.round(dx / pxPerFrame)
         if (df !== 0 && drag.current.dopeFrame !== undefined) {
           const newFrame = drag.current.dopeFrame + df
-          onMoveDopeKeyframe(drag.current.dopeBoneRefs ?? [], drag.current.dopeMorphRefs ?? [], newFrame)
+          onMoveDopeKeyframe(
+            drag.current.dopeBoneRefs ?? [],
+            drag.current.dopeMorphRefs ?? [],
+            drag.current.dopeCameraRefs ?? [],
+            newFrame,
+          )
           drag.current.dopeFrame = Math.max(0, newFrame)
           drag.current.startX = e.clientX
+        }
+        return
+      }
+      if (drag.current?.type === "camera-curve") {
+        const dx = e.clientX - (drag.current.startX ?? 0)
+        const dy = e.clientY - (drag.current.startY ?? 0)
+        const df = Math.round(dx / pxPerFrame)
+        const h = el.clientHeight
+        const curveH = h - DOPE_H - (audioPeaks ? AUDIO_H : 0) - 1 - RULER_H
+        const ax = getAxisConfig(tab)
+        const dv = -(dy / curveH) * ((ax.max - ax.min) / Math.max(0.0001, yZoom))
+        const ref = drag.current.cameraKfRef
+        if ((df !== 0 || Math.abs(dv) > 0.01) && drag.current.channel && ref) {
+          onMoveCameraKeyframe(ref, drag.current.channel, ref.frame + df, dv)
+          if (df !== 0) drag.current.startX = e.clientX
+          drag.current.startY = e.clientY
         }
         return
       }
@@ -1143,7 +1422,7 @@ function TimelineCanvas({
         const dy = e.clientY - (drag.current.startY ?? 0)
         const df = Math.round(dx / pxPerFrame)
         const h = el.clientHeight
-        const curveH = h - DOPE_H - 1 - RULER_H
+        const curveH = h - DOPE_H - (audioPeaks ? AUDIO_H : 0) - 1 - RULER_H
         const ax = getAxisConfig(tab)
         const dw = -(dy / curveH) * ((ax.max - ax.min) / Math.max(0.0001, yZoom))
         const ref = drag.current.morphKfRef
@@ -1160,7 +1439,7 @@ function TimelineCanvas({
         const dy = e.clientY - (drag.current.startY ?? 0)
         const df = Math.round(dx / pxPerFrame)
         const h = el.clientHeight
-        const curveH = h - DOPE_H - 1 - RULER_H
+        const curveH = h - DOPE_H - (audioPeaks ? AUDIO_H : 0) - 1 - RULER_H
         const ax = getAxisConfig(tab)
         const dv = -(dy / curveH) * ((ax.max - ax.min) / Math.max(0.0001, yZoom))
         const ref = drag.current.boneKfRef
@@ -1177,19 +1456,19 @@ function TimelineCanvas({
       el.style.cursor =
         hit?.zone === "dope"
           ? "ew-resize"
-          : hit?.zone === "curve" || hit?.zone === "morph-curve"
+          : hit?.zone === "curve" || hit?.zone === "morph-curve" || hit?.zone === "camera-curve"
             ? "grab"
             : hit?.zone === "ruler"
               ? "col-resize"
               : "default"
     },
-    [hitTest, pxPerFrame, yZoom, scrollX, clip, tab, onSetCurrentFrame, onMoveDopeKeyframe, onMoveCurveKeyframe, onMoveMorphKeyframe],
+    [hitTest, pxPerFrame, yZoom, scrollX, clip, frameCount, audioPeaks, tab, onSetCurrentFrame, onMoveDopeKeyframe, onMoveCurveKeyframe, onMoveMorphKeyframe, onMoveCameraKeyframe],
   )
 
   const endDrag = useCallback(() => {
     const d = drag.current
     drag.current = null
-    if (d && (d.type === "dope" || d.type === "curve" || d.type === "morph-curve")) {
+    if (d && (d.type === "dope" || d.type === "curve" || d.type === "morph-curve" || d.type === "camera-curve")) {
       onEndKeyframeDrag()
     }
   }, [onEndKeyframeDrag])
@@ -1219,6 +1498,8 @@ interface TimelineProps {
   /** A restored draft's view (zoom + scroll), applied once as soon as it
    *  arrives (boot restore resolves asynchronously, after this component has
    *  already mounted with the plain defaults below). */
+  audioPeaks: readonly number[] | null
+  audioDuration: number
   initialView?: { pxPerFrame: number; yZoom: number; scrollX: number }
   /** Fires after mount on every view change (not on the initial render) —
    *  lets the parent persist it without owning this state itself. */
@@ -1231,6 +1512,8 @@ export function Timeline({
   tab,
   setTab,
   playheadDrawRef,
+  audioPeaks,
+  audioDuration,
   initialView,
   onViewChange,
 }: TimelineProps) {
@@ -1238,9 +1521,22 @@ export function Timeline({
   const selectedBone = useStudioSelector((s) => s.selectedBone)
   const selectedMorph = useStudioSelector((s) => s.selectedMorph)
   const selectedKeyframes = useStudioSelector((s) => s.selectedKeyframes)
-  const { commit, setSelectedKeyframes } = useStudioActions()
+  const cameraTrack = useStudioSelector((s) => s.cameraTrack)
+  const cameraSelected = useStudioSelector((s) => s.cameraSelected)
+  const { commit, commitCamera, setSelectedKeyframes } = useStudioActions()
+  const selectionKind: "bone" | "morph" | "camera" = cameraSelected
+    ? "camera"
+    : selectedMorph
+      ? "morph"
+      : "bone"
+  const visibleTabs = tabsForSelection(selectionKind)
   const { currentFrame, setCurrentFrame, playing, setPlaying } = usePlayback()
-  const fc = clip?.frameCount ?? 0
+  // The timeline spans whichever is longer. A camera VMD carries no bone or
+  // morph frames, so a camera-only load leaves `clip.frameCount` at its default
+  // while the shot itself runs for minutes — without this the ruler would end
+  // long before the track it is drawing.
+  const lastCameraFrame = cameraTrack.length > 0 ? cameraTrack[cameraTrack.length - 1].frame : 0
+  const fc = Math.max(clip?.frameCount ?? 0, lastCameraFrame)
   const [endDraft, setEndDraft] = useState<string | null>(null)
   const [frameDraft, setFrameDraft] = useState<string | null>(null)
   // Lazy-initialized from a restored draft's view, read once at first mount —
@@ -1456,11 +1752,12 @@ export function Timeline({
     (
       boneRefs: Array<{ bone: string; kf: BoneKeyframe }>,
       morphRefs: Array<{ morph: string; kf: MorphKeyframe }>,
+      cameraRefs: CameraKeyframe[],
       toFrame: number,
     ) => {
       if (!clip) return
       const clamped = Math.max(0, toFrame)
-      const fromFrame = boneRefs[0]?.kf.frame ?? morphRefs[0]?.kf.frame
+      const fromFrame = boneRefs[0]?.kf.frame ?? morphRefs[0]?.kf.frame ?? cameraRefs[0]?.frame
       if (fromFrame === undefined || clamped === fromFrame) return
       for (const { bone, kf } of boneRefs) {
         kf.frame = clamped
@@ -1470,6 +1767,7 @@ export function Timeline({
         kf.frame = clamped
         clip.morphTracks.get(morph)?.sort((a, b) => a.frame - b.frame)
       }
+      for (const kf of cameraRefs) kf.frame = clamped
       for (const s of selectedKeyframes) {
         if (s.type === "dope" && s.frame === fromFrame) (s as { frame: number }).frame = clamped
       }
@@ -1533,18 +1831,48 @@ export function Timeline({
     [clip, selectedKeyframes],
   )
 
+  /** Live camera edit: mutate the keyframe in place (the engine is handed the
+   *  same array, so the viewport follows the drag) and repaint. The undoable
+   *  commit lands once, on mouse-up, like every other drag here. */
+  const onMoveCameraKeyframe = useCallback(
+    (kfRef: CameraKeyframe, channelKey: string, toFrame: number, dv: number) => {
+      const ch = CAMERA_CHANNELS.find((c) => c.key === channelKey)
+      if (!ch) return
+      // Identity first, then the frame it describes — a ref captured before an
+      // undo points at a keyframe that is on screen but no longer in the track.
+      const kf = cameraTrack.includes(kfRef) ? kfRef : cameraTrack.find((k) => k.frame === kfRef.frame)
+      if (!kf) return
+      const clamped = Math.max(0, toFrame)
+      const fromFrame = kf.frame
+      if (clamped !== fromFrame) kf.frame = clamped
+      if (dv) ch.set(kf, ch.get(kf) + dv)
+      for (const sk of selectedKeyframes) {
+        if (sk.channel === channelKey && sk.frame === fromFrame) (sk as { frame: number }).frame = clamped
+      }
+      dragTouchedRef.current = true
+      dragRedrawRef.current?.()
+    },
+    [cameraTrack, selectedKeyframes],
+  )
+
   const onEndKeyframeDrag = useCallback(() => {
     if (!dragTouchedRef.current) return
     dragTouchedRef.current = false
     // Single commit for the whole drag — this is what lands in undo/redo and
     // triggers the engine reupload via EngineBridge.
-    commit((c) =>
-      c ? { ...c, boneTracks: new Map(c.boneTracks), morphTracks: new Map(c.morphTracks) } : null,
-    )
+    if (isCameraTab(tab)) {
+      // Sorting happens inside commitCamera — a drag can carry a keyframe past
+      // its neighbour, and the sampler binary-searches.
+      commitCamera((t) => [...t])
+    } else {
+      commit((c) =>
+        c ? { ...c, boneTracks: new Map(c.boneTracks), morphTracks: new Map(c.morphTracks) } : null,
+      )
+    }
     // Notify selection subscribers with a new array reference (entries were
     // already mutated in place during the drag).
     setSelectedKeyframes((prev) => [...prev])
-  }, [commit, setSelectedKeyframes])
+  }, [commit, commitCamera, tab, setSelectedKeyframes])
 
   return (
     <div className="flex h-full w-full select-none flex-col" style={{ fontFamily: FONT }}>
@@ -1691,29 +2019,45 @@ export function Timeline({
         </div>
         <div className="mx-0.5 h-3.5 w-px shrink-0 bg-line" />
         {/* Channel tabs */}
-        {TABS.map((t) => {
+        {visibleTabs.map((t) => {
           if (t.sep)
             return <div key={t.key} className="mx-px h-3.5 w-px shrink-0 bg-line" />
           const active = tab === t.key
-          // A selection scopes the tabs to what it can actually show: a
-          // selected morph has no rotation/translation to plot, a selected
-          // bone has no morph weight. Nothing selected leaves every tab open.
-          const disabled = selectedMorph ? t.key !== "morph" : selectedBone ? t.key === "morph" : false
           return (
             <Button
               type="button"
               key={t.key}
               variant="ghost"
               size="sm"
-              disabled={disabled}
               onClick={() => setTab(t.key)}
               className={cn(
                 "h-5 max-h-5 min-h-5 shrink-0 overflow-hidden rounded-md px-1.5 font-mono text-[10px]",
                 "focus-visible:outline-none focus-visible:ring-0",
+                // The Button base ships `transition-all`, which fades the fill
+                // in over ~150ms. That was invisible while the active chip was
+                // barely a shade off the toolbar; against a solid fill it reads
+                // as the highlight lagging the click. A tab is a statement of
+                // where you are, not an animation — it should land at once.
+                "transition-none",
+                // The ghost variant ships `hover:text-accent-foreground` and
+                // `dark:hover:bg-accent/50`, both of which out-specify a plain
+                // `text-*`/`bg-*` here — so the tab you just clicked kept
+                // showing HOVER styling (dark fill, light text) for as long as
+                // the pointer stayed on it, which looked like the highlight
+                // never arrived. An active tab has nothing to advertise on
+                // hover: it is already where you are. So its hover state is
+                // pinned to its active state, dark: variant included.
                 active
                   ? t.color
-                    ? "text-[#0f0f12] hover:opacity-90"
-                    : "bg-secondary text-foreground hover:bg-secondary/80"
+                    ? "text-[#0f0f12] hover:text-[#0f0f12] hover:opacity-90 dark:hover:bg-transparent"
+                    // The aggregate tabs (All Rot / All Trans / All Tgt) and
+                    // Weight carry no hue of their own, so they cannot use the
+                    // solid-fill treatment the axis tabs get from `t.color`.
+                    // bg-secondary is barely a shade off the toolbar and read
+                    // as inactive; a solid light chip gives them the same
+                    // weight as a coloured one without claiming a hue that
+                    // belongs to a channel.
+                    : "bg-foreground/90 text-background hover:bg-foreground hover:text-background dark:hover:bg-foreground"
                   : "opacity-65 hover:opacity-100 hover:bg-transparent dark:hover:bg-transparent active:bg-muted/50",
                 !active && !t.color && "text-muted-foreground",
               )}
@@ -1746,6 +2090,10 @@ export function Timeline({
             currentFrame={currentFrame}
             selectedBone={selectedBone}
             selectedMorph={selectedMorph}
+            cameraTrack={cameraTrack}
+            frameCount={fc}
+            audioPeaks={audioPeaks}
+            audioDuration={audioDuration}
             visibleBones={visibleBones}
             selectedKeyframes={selectedKeyframes}
             tab={tab}
@@ -1757,6 +2105,7 @@ export function Timeline({
             onMoveDopeKeyframe={onMoveDopeKeyframe}
             onMoveCurveKeyframe={onMoveCurveKeyframe}
             onMoveMorphKeyframe={onMoveMorphKeyframe}
+            onMoveCameraKeyframe={onMoveCameraKeyframe}
             onEndKeyframeDrag={onEndKeyframeDrag}
             playheadDrawRef={innerDrawRef}
             dragRedrawRef={dragRedrawRef}
