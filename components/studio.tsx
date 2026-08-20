@@ -1313,7 +1313,7 @@ export function StudioPage() {
               restoredTimelineView are both already final by then, so
               Timeline's lazy-initialized zoom/scroll state starts correct
               instead of being patched in after a defaults-first mount. */}
-          <ResizablePanel id="timeline" defaultSize="24" minSize={220} className="flex min-h-0 flex-col">
+          <ResizablePanel id="timeline" defaultSize={220} minSize={220} className="flex min-h-0 flex-col">
             {studioReady && (
               <Timeline
                 visibleBones={visibleBones}
