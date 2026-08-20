@@ -15,7 +15,17 @@ const DB_VERSION = 1
 const STORE = "audio"
 const KEY = "current"
 
-type StoredAudio = { name: string; file: File }
+/**
+ * Either an imported file, or a marker saying the BUNDLED track is in use.
+ *
+ * The built-in song is already served from /audio behind an immutable cache
+ * header, so copying its several megabytes into IndexedDB as well would be
+ * storing the same bytes twice. What actually needs remembering is the choice —
+ * that music is on, and which track — so a marker carries that and the bytes
+ * are re-fetched. An absent record still means "no music", which is what makes
+ * Clear music survive a reload.
+ */
+type StoredAudio = { name: string; file: File | null; builtin?: boolean }
 
 function open(): Promise<IDBDatabase | null> {
   if (typeof indexedDB === "undefined") return Promise.resolve(null)
@@ -35,13 +45,21 @@ function open(): Promise<IDBDatabase | null> {
   })
 }
 
-export async function saveAudioUpload(name: string, file: File): Promise<boolean> {
+/** Remember that the bundled track is in use, without duplicating its bytes. */
+export function saveBuiltinAudioMarker(name: string): Promise<boolean> {
+  return putAudio({ name, file: null, builtin: true })
+}
+
+export function saveAudioUpload(name: string, file: File): Promise<boolean> {
+  return putAudio({ name, file })
+}
+
+async function putAudio(record: StoredAudio): Promise<boolean> {
   const db = await open()
   if (!db) return false
   return new Promise((resolve) => {
     try {
       const tx = db.transaction(STORE, "readwrite")
-      const record: StoredAudio = { name, file }
       tx.objectStore(STORE).put(record, KEY)
       tx.oncomplete = () => resolve(true)
       // Quota is the expected failure — a long track in a tight browser.
@@ -55,7 +73,7 @@ export async function saveAudioUpload(name: string, file: File): Promise<boolean
   })
 }
 
-export async function loadAudioUpload(): Promise<{ name: string; file: File } | null> {
+export async function loadAudioUpload(): Promise<StoredAudio | null> {
   const db = await open()
   if (!db) return null
   return new Promise((resolve) => {
@@ -63,8 +81,9 @@ export async function loadAudioUpload(): Promise<{ name: string; file: File } | 
       const req = db.transaction(STORE, "readonly").objectStore(STORE).get(KEY)
       req.onsuccess = () => {
         const rec = req.result as StoredAudio | undefined
-        if (!rec?.file) return resolve(null)
-        resolve({ name: rec.name, file: rec.file })
+        // A record with neither bytes nor the builtin flag is nothing to load.
+        if (!rec || (!rec.file && !rec.builtin)) return resolve(null)
+        resolve(rec)
       }
       req.onerror = () => resolve(null)
     } catch {

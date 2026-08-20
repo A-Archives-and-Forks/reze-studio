@@ -67,7 +67,7 @@ import { clearDraft, flushDraftWrite, saveDraftSoon, type DraftExtras, type Stor
 import { clearModelUpload, saveModelUpload } from "@/lib/model-store"
 import { wasKeyboardInput } from "@/lib/last-input"
 import { decodeAudioPeaks } from "@/lib/audio"
-import { clearAudioUpload, loadAudioUpload, saveAudioUpload } from "@/lib/audio-store"
+import { clearAudioUpload, loadAudioUpload, saveAudioUpload, saveBuiltinAudioMarker } from "@/lib/audio-store"
 import { AudioBridge } from "@/components/audio-bridge"
 import packageJson from "../package.json"
 
@@ -1732,7 +1732,14 @@ export function StudioPage() {
       const res = await fetch(AUDIO_PATH)
       if (!res.ok) return
       const blob = await res.blob()
-      await installAudio(AUDIO_PATH.split("/").pop() || "music", blob, URL.createObjectURL(blob))
+      const name = AUDIO_PATH.split("/").pop() || "music"
+      if (await installAudio(name, blob, URL.createObjectURL(blob))) {
+        // Remember the CHOICE, not the bytes: without this the default only
+        // ever appeared on a first visit, because the boot path that installs
+        // it runs only when there is no draft — and there is a draft from the
+        // moment anything autosaves.
+        void saveBuiltinAudioMarker(name)
+      }
     } catch {
       // No bundled track in this build — the timeline simply has no lane.
     }
@@ -1856,12 +1863,17 @@ export function StudioPage() {
       if (cancelled) return
       audioRestoredRef.current = true
       if (!stored) return
-      await installAudio(stored.name, stored.file, URL.createObjectURL(stored.file))
+      if (stored.file) {
+        await installAudio(stored.name, stored.file, URL.createObjectURL(stored.file))
+      } else if (stored.builtin) {
+        // Marker only — the bytes live in public/, not in the database.
+        await installDefaultAudio()
+      }
     })()
     return () => {
       cancelled = true
     }
-  }, [installAudio])
+  }, [installAudio, installDefaultAudio])
 
   /** The bundled track, on a first visit only — EngineBridge calls this from the
    *  same branch that loads the demo motion and shot, so the three arrive as one
