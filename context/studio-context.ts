@@ -37,11 +37,19 @@ export type StudioState = {
    *  bone/morph — selecting either clears this, and selecting a material
    *  clears bone/morph. Does not belong to the clip — not in undo history. */
   selectedMaterial: string | null
-  /** Whether the viewport gizmo is currently shown. Decoupled from
-   *  `selectedBone` so the user can hide the gizmo during playback (dblclick
-   *  empty viewport) without losing inspector/bone-list context. Any
-   *  `setSelectedBone` call re-shows the gizmo, including re-selecting the
-   *  same bone — so the user never gets stuck with a hidden gizmo. */
+  /** Whether the viewport gizmo is currently shown.
+   *
+   *  OFF by default, and never turned on as a side effect of selecting a bone:
+   *  the gizmo sits in front of the model it is posing, and most of the time
+   *  what you want from the viewport is to SEE the character — picking a bone
+   *  in the list to read its curves should not put a set of arrows over the
+   *  face. It appears only when asked for, by the two gestures that mean "I
+   *  want to grab this": the Gizmo button in Properties, and a dblclick on the
+   *  bone in the viewport.
+   *
+   *  Decoupled from `selectedBone` so hiding it (dblclick empty viewport) costs
+   *  no inspector or bone-list context, and so it follows the selection once
+   *  shown rather than needing to be re-summoned per bone. */
   gizmoVisible: boolean
   /** The camera shot, as its own track.
    *
@@ -112,7 +120,7 @@ const INITIAL_STATE: StudioState = {
   selectedBone: null,
   selectedMorph: null,
   selectedMaterial: null,
-  gizmoVisible: true,
+  gizmoVisible: false,
   cameraTrack: [],
   cameraSelected: false,
   cameraVmdEnabled: true,
@@ -222,17 +230,10 @@ function createStudioStore(): StudioStore {
       })
     },
     setClipDisplayName: (name) => update("clipDisplayName", name),
-    // Every bone-select event (even re-selecting the same bone) re-shows the
-    // gizmo, so a user who dblclick-empty'd to hide it can bring it back by
-    // clicking the already-highlighted bone in the list. Otherwise the set
-    // bails at the Object.is equality guard in `update()` and the mirror
-    // effect in EngineBridge never re-runs.
-    setSelectedBone: (payload) => {
-      const next = resolve(payload, state.selectedBone)
-      const nextGizmoVisible = next != null ? true : state.gizmoVisible
-      if (next === state.selectedBone && nextGizmoVisible === state.gizmoVisible) return
-      set({ ...state, selectedBone: next, gizmoVisible: nextGizmoVisible })
-    },
+    // Selecting a bone does NOT summon the gizmo — see `gizmoVisible`. The
+    // viewport dblclick path asks for it explicitly, because there the pick and
+    // the intent to grab are the same gesture.
+    setSelectedBone: (payload) => update("selectedBone", payload),
     setSelectedMorph: (payload) => update("selectedMorph", payload),
     setSelectedMaterial: (payload) => update("selectedMaterial", payload),
     setGizmoVisible: (payload) => update("gizmoVisible", payload),

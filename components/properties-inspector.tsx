@@ -359,7 +359,8 @@ export const PropertiesInspector = memo(function PropertiesInspector({
   const selectedKeyframes = useStudioSelector((s) => s.selectedKeyframes)
   const cameraTrack = useStudioSelector((s) => s.cameraTrack)
   const cameraSelected = useStudioSelector((s) => s.cameraSelected)
-  const { commit, commitCamera } = useStudioActions()
+  const gizmoVisible = useStudioSelector((s) => s.gizmoVisible)
+  const { commit, commitCamera, setGizmoVisible } = useStudioActions()
   /** Read-only ref to the playhead. Subscribing here would re-render Properties
    *  every rAF tick during playback; instead we read .current inside callbacks
    *  and let the small <PlayheadFrameLabel/> + <InterpolationSection/> children
@@ -655,6 +656,38 @@ export const PropertiesInspector = memo(function PropertiesInspector({
               title="Remove all keyframes on the selected bone or morph track"
             >
               Clear
+            </Button>
+          </div>
+          {/* The gizmo is off until asked for — it stands between the camera and
+              the model, and reading a bone's curves is not a reason to put
+              arrows over the character's face.
+
+              Pressed-state colouring, the same on/off language the camera-track
+              button over the viewport speaks, and the label names the STATE
+              rather than the action: a "Hide" that becomes "Show" reads as a
+              command and leaves you guessing which word describes right now. */}
+          <div className="flex items-center gap-1.5">
+            <span className="w-10 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">Gizmo</span>
+            <Button
+              type="button"
+              variant="ghost"
+              size="xs"
+              aria-pressed={gizmoVisible}
+              disabled={!selectedBone}
+              onClick={() => setGizmoVisible((v) => !v)}
+              title={
+                gizmoVisible
+                  ? "Hide the transform gizmo (or dblclick empty space in the viewport)"
+                  : "Show the transform gizmo on the selected bone (or dblclick the bone in the viewport)"
+              }
+              className={cn(
+                "h-6 flex-1 border px-0.5 text-[11px]",
+                gizmoVisible
+                  ? "border-blue-400/30 bg-blue-400/[0.12] text-blue-400 hover:bg-blue-400/20 hover:text-blue-400"
+                  : "border-line-strong bg-surface-raised text-muted-foreground hover:text-foreground",
+              )}
+            >
+              {gizmoVisible ? "Visible" : "Hidden"}
             </Button>
           </div>
         </div>

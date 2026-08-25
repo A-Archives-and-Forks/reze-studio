@@ -218,6 +218,10 @@ export function EngineBridge({
       // mutual-exclusion contract holds whether picks come from viewport or
       // from the bone list.
       setSelectedBone(bone)
+      // ...and show the gizmo, which the bone-list path deliberately does not.
+      // Reaching into the viewport and dblclicking the bone itself IS the ask
+      // to grab it; there is nothing else that gesture could be for.
+      if (bone) setGizmoVisible(true)
       setSelectedMorph(null)
       setSelectedMaterial(null)
       setSelectedKeyframes([])

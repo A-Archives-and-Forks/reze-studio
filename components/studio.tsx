@@ -14,7 +14,7 @@ import {
 } from "react"
 import Link from "next/link"
 import Image from "next/image"
-import { FilePlus2, FolderOpen, FileMusic, FileDown, RotateCcw, Check, Video, Orbit, Eraser, Music } from "lucide-react"
+import { FilePlus2, FolderOpen, FileMusic, FileDown, RotateCcw, Check, Video, Orbit, Eraser, Music, Film } from "lucide-react"
 import { Engine, Model, Vec3, VMDLoader, VMDWriter, parsePmxFolderInput, pmxFileAtRelativePath } from "reze-engine"
 import { Button } from "@/components/ui/button"
 import {
@@ -69,6 +69,7 @@ import { wasKeyboardInput } from "@/lib/last-input"
 import { decodeAudioPeaks } from "@/lib/audio"
 import { clearAudioUpload, loadAudioUpload, saveAudioUpload, saveBuiltinAudioMarker } from "@/lib/audio-store"
 import { AudioBridge } from "@/components/audio-bridge"
+import { ReferenceVideo } from "@/components/reference-video"
 import packageJson from "../package.json"
 
 const APP_VERSION = packageJson.version
@@ -198,6 +199,8 @@ type StudioLeftPanelProps = {
   musicInputRef: RefObject<HTMLInputElement | null>
   clearMusic: () => void
   hasMusic: boolean
+  onPickVideoFile: (e: ChangeEvent<HTMLInputElement>) => void
+  videoInputRef: RefObject<HTMLInputElement | null>
 }
 
 /** File menu + bone/morph lists — lives in page so the shell isn’t a separate layout file. */
@@ -244,6 +247,8 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
   musicInputRef,
   clearMusic,
   hasMusic,
+  onPickVideoFile,
+  videoInputRef,
 }: StudioLeftPanelProps) {
   const clip = useStudioSelector((s) => s.clip)
   const ikEnabled = useStudioSelector((s) => s.ikEnabled)
@@ -307,6 +312,15 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
             tabIndex={-1}
             aria-hidden
             onChange={onPickMusicFile}
+          />
+          <input
+            ref={videoInputRef}
+            type="file"
+            accept="video/*"
+            className="hidden"
+            tabIndex={-1}
+            aria-hidden
+            onChange={onPickVideoFile}
           />
           <input
             ref={cameraVmdInputRef}
@@ -385,6 +399,13 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
                   >
                     <Music className="size-3.5" />
                     Import music…
+                  </MenubarItem>
+                  <MenubarItem
+                    className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
+                    onSelect={() => videoInputRef.current?.click()}
+                  >
+                    <Film className="size-3.5" />
+                    Import reference video…
                   </MenubarItem>
                 </MenubarGroup>
                 <MenubarSeparator className="my-0.5" />
@@ -667,6 +688,10 @@ export function StudioPage() {
   useEffect(() => {
     audioRef.current = audio
   }, [audio])
+  /** The reference video, if one is open. Object URL only — unlike the music
+   *  track this is never persisted: a dance reference runs to hundreds of
+   *  megabytes, and re-picking it is one menu item. */
+  const [referenceVideo, setReferenceVideo] = useState<{ name: string; url: string } | null>(null)
   /** Mirrors for use inside stable callbacks (draft persistence) without
    *  pulling these values into their dependency arrays. More mirrors sit
    *  next to selectedGroup/rightPanelTab/timelineTab below, once those exist. */
@@ -706,6 +731,7 @@ export function StudioPage() {
   const cameraVmdInputRef = useRef<HTMLInputElement>(null)
   const morphVmdInputRef = useRef<HTMLInputElement>(null)
   const musicInputRef = useRef<HTMLInputElement>(null)
+  const videoInputRef = useRef<HTMLInputElement>(null)
   const pmxFolderInputRef = useRef<HTMLInputElement>(null)
   /** Matches `engine.loadModel` name so `removeModel` can swap uploads without patching the engine. */
   const loadedModelNameRef = useRef("reze")
@@ -1592,6 +1618,32 @@ export function StudioPage() {
     void clearAudioUpload()
   }, [])
 
+  const closeReferenceVideo = useCallback(() => {
+    setReferenceVideo((prev) => {
+      if (prev) URL.revokeObjectURL(prev.url)
+      return null
+    })
+  }, [])
+
+  const onPickVideoFile = useCallback(
+    (e: ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0]
+      e.target.value = ""
+      if (!file) return
+      // Nothing to decode: the element does that itself, and reading the file
+      // into memory first would only duplicate a very large asset.
+      setReferenceVideo((prev) => {
+        if (prev) URL.revokeObjectURL(prev.url)
+        return { name: file.name, url: URL.createObjectURL(file) }
+      })
+      blurActiveElement()
+    },
+    [blurActiveElement],
+  )
+
+  // The URL outlives React state on a hard unmount, so hand it back.
+  useEffect(() => () => closeReferenceVideo(), [closeReferenceVideo])
+
   const onPickVmdFile = useCallback(
     async (e: ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0]
@@ -1771,6 +1823,7 @@ export function StudioPage() {
       if (prev?.url) URL.revokeObjectURL(prev.url)
       return null
     })
+    closeReferenceVideo()
 
     setPlaying(false)
     setCurrentFrame(0)
@@ -1837,6 +1890,7 @@ export function StudioPage() {
   }, [
     applyLoadedPmxModel,
     syncStudioAfterNewClip,
+    closeReferenceVideo,
     replaceClip,
     setClipDisplayName,
     setSelectedBone,
@@ -1962,6 +2016,8 @@ export function StudioPage() {
           musicInputRef={musicInputRef}
           clearMusic={clearMusic}
           hasMusic={audio != null}
+          onPickVideoFile={onPickVideoFile}
+          videoInputRef={videoInputRef}
         />
 
         {/* Center: viewport + timeline, resizable */}
@@ -2047,6 +2103,14 @@ export function StudioPage() {
       </div>
 
       <AudioBridge audioUrl={audio?.url ?? null} />
+      {referenceVideo && (
+        <ReferenceVideo
+          key={referenceVideo.url}
+          src={referenceVideo.url}
+          name={referenceVideo.name}
+          onClose={closeReferenceVideo}
+        />
+      )}
       <StudioStatusFooter
         clipDisplayName={clipDisplayName}
         hasClip={clip != null}
