@@ -964,14 +964,39 @@ function TimelineCanvas({
             if (!rotSamples) rotSamples = buildRotSamples()
             const axis = ch.key === "rx" ? 0 : ch.key === "ry" ? 1 : 2
             let prevV: number | null = null
+            let prevX = 0
             for (const smp of rotSamples) {
               const v = smp.e[axis]
+              if (prevV === null) {
+                ctx.moveTo(smp.x, toY(v))
+                prevV = v
+                prevX = smp.x
+                continue
+              }
               // A component crossing ±180 is the same rotation seen from the
-              // other side of the wrap, not a move across the whole graph.
-              // Break the stroke rather than drawing the cliff.
-              if (prevV === null || Math.abs(v - prevV) > 180) ctx.moveTo(smp.x, toY(v))
-              else ctx.lineTo(smp.x, toY(v))
+              // other side of the wrap, not a leap across the whole plot.
+              //
+              // Drawn the way any wrapped angle should be: the line runs OFF
+              // one edge and re-enters at the other, crossing at the x where
+              // it actually passes ±180. Simply breaking the stroke here was
+              // worse than the cliff it avoided — a break is a `moveTo`, and a
+              // `moveTo` nothing follows draws no pixels at all, so a keyframe
+              // whose sample happened to be the one suppressed lost the line
+              // to its own dot and sat orphaned in empty space.
+              let d = v - prevV
+              if (d > 180) d -= 360
+              else if (d < -180) d += 360
+              if (Math.abs(v - prevV) > 180 && d !== 0) {
+                const exit = d > 0 ? 180 : -180
+                const xc = prevX + (smp.x - prevX) * ((exit - prevV) / d)
+                ctx.lineTo(xc, toY(exit))
+                // moveTo opens a new subpath inside the same path object, so
+                // this still costs one stroke for the whole channel.
+                ctx.moveTo(xc, toY(-exit))
+              }
+              ctx.lineTo(smp.x, toY(v))
               prevV = v
+              prevX = smp.x
             }
           } else {
             // Translation is three independent per-axis curves, so easing
