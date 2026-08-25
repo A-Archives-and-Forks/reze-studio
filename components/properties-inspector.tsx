@@ -378,7 +378,9 @@ export const PropertiesInspector = memo(function PropertiesInspector({
 
   const showBoneStats = !!(selectedBone && clip && !selectedMorph && !multiSel)
 
-  const ROT_RANGE = { min: -180, max: 180 }
+  // Rotation ranges come off the channels themselves (X is ±90, Y/Z are ±180 —
+  // see Channel.range), so a slider cannot ask for a value the keyframe write
+  // will refuse.
   const TRA_RANGE = { min: -10, max: 10 }
 
   // ─── Slider preview / commit split ──────────────────────────────────
@@ -575,7 +577,6 @@ export const PropertiesInspector = memo(function PropertiesInspector({
             setTimelineTab={setTimelineTab}
             applyRotationAxis={applyRotationAxis}
             applyTranslationAxis={applyTranslationAxis}
-            rotRange={ROT_RANGE}
             traRange={TRA_RANGE}
           />
 
@@ -708,7 +709,6 @@ function LiveBoneSliders({
   setTimelineTab,
   applyRotationAxis,
   applyTranslationAxis,
-  rotRange,
   traRange,
 }: {
   modelRef: RefObject<Model | null>
@@ -718,7 +718,6 @@ function LiveBoneSliders({
   setTimelineTab: (t: string) => void
   applyRotationAxis: (axisIdx: 0 | 1 | 2, v: number, mode: "preview" | "commit") => void
   applyTranslationAxis: (axisIdx: 0 | 1 | 2, v: number, mode: "preview" | "commit") => void
-  rotRange: { min: number; max: number }
   traRange: { min: number; max: number }
 }) {
   const livePose = useLivePose(modelRef, selectedBone, clip)
@@ -732,8 +731,8 @@ function LiveBoneSliders({
             axis={["X", "Y", "Z"][i] as string}
             color={ch.color}
             value={[livePose.euler.x, livePose.euler.y, livePose.euler.z][i]}
-            min={rotRange.min}
-            max={rotRange.max}
+            min={ch.range.min}
+            max={ch.range.max}
             decimals={2}
             disabled={!clip}
             onChange={(v) => {

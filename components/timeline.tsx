@@ -24,9 +24,12 @@ import { cn } from "@/lib/utils"
 import { useStudioActions, useStudioSelector, type SelectedKeyframe } from "@/context/studio-context"
 import { usePlayback } from "@/context/playback-context"
 import type { AnimationClip, BoneKeyframe, CameraKeyframe, MorphKeyframe } from "reze-engine"
-import { bezierInterpolate } from "reze-engine"
+import { bezierInterpolate, Quat } from "reze-engine"
 import {
   type Channel,
+  quatToEuler,
+  sampleBoneTrackAt,
+  sampleMorphTrackAt,
   ROT_CHANNELS,
   TRA_CHANNELS,
   CAMERA_TABS,
@@ -170,7 +173,20 @@ function getAxisConfig(tab: string) {
   const chans = getChannelsForTab(tab)
   const isRot = chans[0].group === "rot"
   if (isRot) {
-    return { min: -90, max: 90, tickMin: -90, tickMax: 90, unit: "°", side: "left" as const, step: 30, subStep: 15 }
+    // ±180 is the actual domain of a euler component — the same range the
+    // camera rotation tab above already uses, for the same values in the same
+    // units. This was ±90, which quietly clipped half of it: a turn past 90°
+    // ran off the top of the plot and simply was not there to read, which is
+    // its own reason a rotation past 180° was impossible to build against.
+    // Y-zoom gets the old, tighter scale back for a bone that only moves a
+    // little.
+    //
+    // Plotted to ±200 for the same reason morph weight is plotted to [-0.1,
+    // 1.1]: a keyframe sitting exactly on the boundary is hard to see and
+    // harder to grab when the plot ends precisely where the data does. The
+    // extra 20° is a click target, not a value — tickMin/tickMax hold the
+    // ticks and labels to the real ±180.
+    return { min: -200, max: 200, tickMin: -180, tickMax: 180, unit: "°", side: "left" as const, step: 90, subStep: 45 }
   } else {
     return { min: -10, max: 10, ...UNBOUNDED, unit: "", side: "left" as const, step: 5, subStep: 2.5 }
   }
@@ -896,39 +912,92 @@ function TimelineCanvas({
       if (keyframes && keyframes.length > 0) {
         const isSingle = channels.length === 1
 
-        for (const ch of channels) {
-          const interpKey =
-            ch.group === "rot"
-              ? "rotation"
-              : ch.key === "tx"
-                ? "translationX"
-                : ch.key === "ty"
-                  ? "translationY"
-                  : "translationZ"
+        /**
+         * Rotation, sampled the way playback evaluates it.
+         *
+         * Between two keyframes a bone SLERPS: the eased t drives a
+         * quaternion interpolation, and the euler the panels show is a
+         * decomposition of the result. Easing the three euler numbers
+         * independently — which is what this used to draw — is a different
+         * curve, and across a ±180 wrap it is the OPPOSITE one: the line falls
+         * the long way through zero while the bone turns the short way. A turn
+         * built against that graph fights the model, which is exactly what
+         * makes going past 180° feel impossible.
+         *
+         * Sampled once for all three axes, because rx/ry/rz are three
+         * components of the same sampled quaternion and the slerp is the
+         * expensive part. Built lazily, so a translation-only tab pays nothing.
+         */
+        let rotSamples: { x: number; e: [number, number, number] }[] | null = null
+        const buildRotSamples = () => {
+          const out: { x: number; e: [number, number, number] }[] = []
+          for (let i = 1; i < keyframes.length; i++) {
+            const prev = keyframes[i - 1]
+            const kf = keyframes[i]
+            const prevX = toX(prev.frame)
+            const x = toX(kf.frame)
+            // Culled at both ends only, so this never opens a hole in the
+            // middle of the path: what it drops is a prefix and a suffix.
+            if (x < LABEL_W - 8 || prevX > w + 8) continue
+            if (out.length === 0) {
+              const e0 = quatToEuler(prev.rotation)
+              out.push({ x: prevX, e: [e0.x, e0.y, e0.z] })
+            }
+            const cp = kf.interpolation.rotation
+            // One sample per ~3px — finer than that is below what the canvas
+            // can show, and every sample is a slerp plus a decomposition.
+            const segs = Math.max(2, Math.min(96, Math.ceil((x - prevX) / 3)))
+            for (let sIdx = 1; sIdx <= segs; sIdx++) {
+              const u = sIdx / segs
+              const e = quatToEuler(Quat.slerp(prev.rotation, kf.rotation, bezierY(cp[0], cp[1], u)))
+              out.push({ x: prevX + (x - prevX) * u, e: [e.x, e.y, e.z] })
+            }
+          }
+          return out
+        }
 
-          // Draw curve
+        for (const ch of channels) {
           ctx.strokeStyle = ch.color
           ctx.lineWidth = isSingle ? 2 : 1.2
           ctx.beginPath()
-          let started = false
-          for (let i = 0; i < keyframes.length; i++) {
-            const kf = keyframes[i]
-            const val = ch.get(kf)
-            const x = toX(kf.frame)
-            if (!started) {
-              ctx.moveTo(x, toY(val))
-              started = true
-              continue
+          if (ch.group === "rot") {
+            if (!rotSamples) rotSamples = buildRotSamples()
+            const axis = ch.key === "rx" ? 0 : ch.key === "ry" ? 1 : 2
+            let prevV: number | null = null
+            for (const smp of rotSamples) {
+              const v = smp.e[axis]
+              // A component crossing ±180 is the same rotation seen from the
+              // other side of the wrap, not a move across the whole graph.
+              // Break the stroke rather than drawing the cliff.
+              if (prevV === null || Math.abs(v - prevV) > 180) ctx.moveTo(smp.x, toY(v))
+              else ctx.lineTo(smp.x, toY(v))
+              prevV = v
             }
-            const prev = keyframes[i - 1]
-            const prevVal = ch.get(prev)
-            const prevX = toX(prev.frame)
-            const cp = ch.group === "rot" ? kf.interpolation.rotation : kf.interpolation[interpKey as keyof typeof kf.interpolation] as [{ x: number; y: number }, { x: number; y: number }]
-            const segs = Math.max(12, Math.ceil((x - prevX) / 3))
-            for (let s = 1; s <= segs; s++) {
-              const t = s / segs
-              const interp = bezierY(cp[0], cp[1], t)
-              ctx.lineTo(prevX + (x - prevX) * t, toY(prevVal + (val - prevVal) * interp))
+          } else {
+            // Translation is three independent per-axis curves, so easing
+            // between the keyframe values IS what playback does.
+            const interpKey =
+              ch.key === "tx" ? "translationX" : ch.key === "ty" ? "translationY" : "translationZ"
+            let started = false
+            for (let i = 0; i < keyframes.length; i++) {
+              const kf = keyframes[i]
+              const val = ch.get(kf)
+              const x = toX(kf.frame)
+              if (!started) {
+                ctx.moveTo(x, toY(val))
+                started = true
+                continue
+              }
+              const prev = keyframes[i - 1]
+              const prevVal = ch.get(prev)
+              const prevX = toX(prev.frame)
+              const cp = kf.interpolation[interpKey] as [{ x: number; y: number }, { x: number; y: number }]
+              const segs = Math.max(12, Math.ceil((x - prevX) / 3))
+              for (let s = 1; s <= segs; s++) {
+                const t = s / segs
+                const interp = bezierY(cp[0], cp[1], t)
+                ctx.lineTo(prevX + (x - prevX) * t, toY(prevVal + (val - prevVal) * interp))
+              }
             }
           }
           ctx.stroke()
@@ -1110,10 +1179,10 @@ function TimelineCanvas({
           ctx.font = `10px ${FONT}`
           ctx.textBaseline = "top"
           ctx.textAlign = "right"
-          let val = 0
-          for (const k of morphKfs) {
-            if (k.frame <= frame) val = k.weight
-          }
+          // Sampled, for the same reason the bone readout below is: the curve
+          // beside it is drawn linear between keys, so a held value contradicts
+          // the line it sits on.
+          const val = sampleMorphTrackAt(morphKfs, frame)
           ctx.fillStyle = MORPH_COLOR
           ctx.fillText(`Weight: ${val.toFixed(2)}`, w - 8, curveTop + 5)
         }
@@ -1131,13 +1200,18 @@ function TimelineCanvas({
             const s = isRotGroup ? `${v.toFixed(1)}°` : v.toFixed(2)
             return s.padStart(numWidth, " ")
           }
+          // Sampled, not held. This used to show the last keyframe at or
+          // before the playhead, so between keys it reported a pose the model
+          // was no longer in and never agreed with the Properties panel — the
+          // other half of "the numbers and the curve disagree".
+          const pose = sampleBoneTrackAt(keyframes, frame)
           channels.forEach((ch, i) => {
-            let val = 0
-            for (const k of keyframes) {
-              if (k.frame <= frame) val = ch.get(k)
-            }
             ctx.fillStyle = ch.color
-            ctx.fillText(`${ch.label}: ${formatVal(val)}`, w - 8, curveTop + 5 + i * 13)
+            ctx.fillText(
+              `${ch.label}: ${formatVal(pose ? ch.pick(pose) : 0)}`,
+              w - 8,
+              curveTop + 5 + i * 13,
+            )
           })
         }
       }
