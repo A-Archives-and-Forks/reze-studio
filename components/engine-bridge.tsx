@@ -27,15 +27,30 @@ import { loadDraft, type StoredTimelineView } from "@/lib/draft"
 import { clearModelUpload, loadModelUpload } from "@/lib/model-store"
 
 // ─── Constants shared with StudioPage file handlers ──────────────────────
-export const MODEL_PATH = "/models/塞尔凯特/塞尔凯特.pmx"
-export const VMD_PATH = "/animations/Classic.vmd"
+
+/**
+ * Where the demo model, motion and music come from.
+ *
+ * A deployed build reads them from R2, whose egress is free, so the ~25MB a
+ * visitor downloads never touches the deployment's transfer budget — one pool
+ * shared across every project on the account. `next dev` reads the same files
+ * out of `public/`, which keeps a checkout self-contained: edit a texture,
+ * reload, no round trip through a bucket.
+ *
+ * Keys there are versioned by path, which is what lets them carry a one-year
+ * immutable cache header: rename, never overwrite in place.
+ */
+const ASSETS = process.env.NODE_ENV === "production" ? "https://assets.reze.one/demo/reze-studio" : ""
+
+export const MODEL_PATH = `${ASSETS}/models/塞尔凯特/塞尔凯特.pmx`
+export const VMD_PATH = `${ASSETS}/animations/Classic.vmd`
 /** The shot and the song that ship with the demo motion — one scene, so they
  *  arrive together on a fresh boot rather than leaving the dance unscored. */
-export const CAMERA_VMD_PATH = "/animations/Classic_camera.vmd"
+export const CAMERA_VMD_PATH = `${ASSETS}/animations/Classic_camera.vmd`
 /** The expression track, kept apart from the dance the way MMD keeps them —
  *  it is laid OVER the motion rather than being part of it. */
-export const MORPH_VMD_PATH = "/animations/Classic_morph.vmd"
-export const AUDIO_PATH = "/audio/Classic.mp3"
+export const MORPH_VMD_PATH = `${ASSETS}/animations/Classic_morph.vmd`
+export const AUDIO_PATH = `${ASSETS}/audio/Classic.mp3`
 export const STUDIO_ANIM_NAME = "studio"
 export const BUNDLED_PMX_FILENAME = MODEL_PATH.replace(/^.*\//, "") || "model.pmx"
 
