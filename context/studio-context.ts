@@ -25,6 +25,10 @@ export interface SelectedKeyframe {
   morph?: string
   frame: number
   channel?: string
+  /** Set when the entry names the camera track. A camera dope column is
+   *  otherwise indistinguishable from a bone column — both are a bare frame —
+   *  and delete/copy have to know which track a frame belongs to. */
+  camera?: boolean
   type: "dope" | "curve"
 }
 

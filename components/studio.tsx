@@ -37,7 +37,7 @@ import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/componen
 import { useDefaultLayout } from "react-resizable-panels"
 import { BONE_GROUPS, CAMERA_DEFAULT_TAB, isCameraTab, quatToEuler } from "@/lib/animation"
 import { autoClassifyMaterials, buildStyleGroups, styleGroupsToPresetMap } from "@/lib/materials"
-import type { AnimationClip, CameraKeyframe, MaterialPresetMap, VmdTrackSelection } from "reze-engine"
+import type { AnimationClip, BoneKeyframe, CameraKeyframe, MaterialPresetMap, MorphKeyframe, VmdTrackSelection } from "reze-engine"
 import { useStudioActions, useStudioSelector } from "@/context/studio-context"
 import { usePlayback, usePlaybackFrameRef } from "@/context/playback-context"
 import {
@@ -55,6 +55,7 @@ import {
 import { StudioStatusFooter, useStudioStatusActions } from "@/components/studio-status"
 import {
   clipRetainedForModel,
+  cloneBoneInterpolation,
   emptyStudioClip,
   interpolationTemplateForFrame,
   readLocalPoseAfterSeek,
@@ -75,6 +76,36 @@ import packageJson from "../package.json"
 const APP_VERSION = packageJson.version
 const REPO_URL = "https://github.com/AmyangXYZ/reze-studio"
 const DOCS_README_URL = `${REPO_URL}/blob/main/README.md`
+
+// Module-level, deliberately: the clipboard outlives whichever panel copied
+// into it, so a copy survives switching bones or morphs. Frames are stored
+// relative to the earliest copied frame; paste re-bases at the playhead.
+// Everything is deep-cloned on the way in AND out — the live drag path
+// mutates keyframes in place, and a clipboard that shares objects with the
+// track would be silently rewritten by the next drag.
+type ClipClipboard = {
+  bones: Array<{ bone: string; rel: number; kf: BoneKeyframe }>
+  morphs: Array<{ morph: string; rel: number; kf: MorphKeyframe }>
+  camera: Array<{ rel: number; kf: CameraKeyframe }>
+}
+let clipboard: ClipClipboard | null = null
+
+const cloneBoneKf = (k: BoneKeyframe): BoneKeyframe => ({
+  boneName: k.boneName,
+  frame: k.frame,
+  rotation: k.rotation.clone(),
+  translation: new Vec3(k.translation.x, k.translation.y, k.translation.z),
+  interpolation: cloneBoneInterpolation(k.interpolation),
+})
+const cloneMorphKf = (k: MorphKeyframe): MorphKeyframe => ({ morphName: k.morphName, frame: k.frame, weight: k.weight })
+const cloneCameraKf = (k: CameraKeyframe): CameraKeyframe => ({
+  frame: k.frame,
+  distance: k.distance,
+  target: new Vec3(k.target.x, k.target.y, k.target.z),
+  rotation: new Vec3(k.rotation.x, k.rotation.y, k.rotation.z),
+  fov: k.fov,
+  interpolation: k.interpolation ? new Uint8Array(k.interpolation) : undefined,
+})
 
 /**
  * How long the timeline should be once something has been cleared.
@@ -1144,71 +1175,157 @@ export function StudioPage() {
     setCurrentFrame(s.frame)
   }, [selectedKeyframes, setSelectedBone, setSelectedMorph, setCurrentFrame])
 
+  /**
+   * Delete every selected keyframe.
+   *
+   * The selection carries what it is: a curve handle names its bone or its
+   * morph, a dopesheet diamond names only a frame — because a dope row IS every
+   * track at that frame, and deleting one there means deleting the column.
+   * `timelineTab` reads which track that column belongs to.
+   */
   const deleteSelectedKeyframes = useCallback(() => {
-    if (!clip || selectedKeyframes.length !== 1) return
-    const sel = selectedKeyframes[0]
+    if (selectedKeyframes.length === 0) return
+    const sel = selectedKeyframes
     setSelectedKeyframes([])
 
-    if (sel.type === "curve" && sel.morph) {
-      commit((prev) => {
-        if (!prev) return prev
-        const track = prev.morphTracks.get(sel.morph!)
-        if (!track) return prev
-        const i = track.findIndex((k) => k.frame === sel.frame)
-        if (i < 0) return prev
-        const morphTracks = new Map(prev.morphTracks)
-        const next = track.filter((_, j) => j !== i)
-        if (next.length === 0) morphTracks.delete(sel.morph!)
-        else morphTracks.set(sel.morph!, next)
-        return { ...prev, morphTracks }
-      })
-      return
-    }
-    if (sel.type === "curve" && sel.bone) {
-      commit((prev) => {
-        if (!prev) return prev
-        const track = prev.boneTracks.get(sel.bone!)
-        if (!track) return prev
-        const i = track.findIndex((k) => k.frame === sel.frame)
-        if (i < 0) return prev
-        const boneTracks = new Map(prev.boneTracks)
-        const next = track.filter((_, j) => j !== i)
-        if (next.length === 0) boneTracks.delete(sel.bone!)
-        else boneTracks.set(sel.bone!, next)
-        return { ...prev, boneTracks }
-      })
-      return
-    }
-    if (sel.type !== "dope") return
-    const f = sel.frame
-    if (timelineTab === "morph" && selectedMorph) {
-      commit((prev) => {
-        if (!prev) return prev
-        const track = prev.morphTracks.get(selectedMorph)
-        if (!track) return prev
-        const i = track.findIndex((k) => k.frame === f)
-        if (i < 0) return prev
-        const morphTracks = new Map(prev.morphTracks)
-        const next = track.filter((_, j) => j !== i)
-        if (next.length === 0) morphTracks.delete(selectedMorph)
-        else morphTracks.set(selectedMorph, next)
-        return { ...prev, morphTracks }
-      })
-      return
-    }
+    // Camera entries live in their own track with their own commit; a mixed
+    // selection cannot happen from the UI (the tab decides what is clickable),
+    // but each half is handled on its own terms anyway.
+    const camFrames = new Set(sel.filter((s) => s.camera).map((s) => s.frame))
+    if (camFrames.size > 0) commitCamera((t) => t.filter((k) => !camFrames.has(k.frame)))
+
+    const rest = sel.filter((s) => !s.camera)
+    if (!clip || rest.length === 0) return
     commit((prev) => {
       if (!prev) return prev
       const boneTracks = new Map(prev.boneTracks)
-      for (const [name, track] of prev.boneTracks) {
-        const i = track.findIndex((k) => k.frame === f)
-        if (i < 0) continue
-        const next = track.filter((_, j) => j !== i)
-        if (next.length === 0) boneTracks.delete(name)
-        else boneTracks.set(name, next)
+      const morphTracks = new Map(prev.morphTracks)
+
+      const dropBone = (bone: string, frame: number) => {
+        const track = boneTracks.get(bone)
+        if (!track) return
+        const next = track.filter((k) => k.frame !== frame)
+        if (next.length === track.length) return
+        if (next.length === 0) boneTracks.delete(bone)
+        else boneTracks.set(bone, next)
       }
-      return { ...prev, boneTracks }
+      const dropMorph = (morph: string, frame: number) => {
+        const track = morphTracks.get(morph)
+        if (!track) return
+        const next = track.filter((k) => k.frame !== frame)
+        if (next.length === track.length) return
+        if (next.length === 0) morphTracks.delete(morph)
+        else morphTracks.set(morph, next)
+      }
+
+      for (const s of rest) {
+        if (s.morph) {
+          dropMorph(s.morph, s.frame)
+        } else if (s.bone) {
+          dropBone(s.bone, s.frame)
+        } else if (s.type === "dope") {
+          // The column. A morph row is selected on its own, so a dope hit while
+          // a morph is what you are editing means that morph's key.
+          if (timelineTab === "morph" && selectedMorph) dropMorph(selectedMorph, s.frame)
+          else for (const name of [...boneTracks.keys()]) dropBone(name, s.frame)
+        }
+      }
+      return { ...prev, boneTracks, morphTracks }
     })
-  }, [clip, selectedKeyframes, timelineTab, selectedMorph, commit, setSelectedKeyframes])
+  }, [clip, selectedKeyframes, timelineTab, selectedMorph, commit, commitCamera, setSelectedKeyframes])
+
+  /**
+   * Copy the selection. The selection carries what it is, same as delete: a
+   * curve handle names its bone or morph, a dope diamond means the whole
+   * column at that frame — every track that keys there.
+   */
+  const copySelectedKeyframes = useCallback(() => {
+    if (selectedKeyframes.length === 0) return
+    const next: ClipClipboard = { bones: [], morphs: [], camera: [] }
+
+    for (const s of selectedKeyframes) {
+      if (s.camera) {
+        const kf = cameraTrack.find((k) => k.frame === s.frame)
+        if (kf) next.camera.push({ rel: kf.frame, kf: cloneCameraKf(kf) })
+      } else if (s.morph) {
+        const kf = clip?.morphTracks.get(s.morph)?.find((k) => k.frame === s.frame)
+        if (kf) next.morphs.push({ morph: s.morph, rel: kf.frame, kf: cloneMorphKf(kf) })
+      } else if (s.bone) {
+        const kf = clip?.boneTracks.get(s.bone)?.find((k) => k.frame === s.frame)
+        if (kf) next.bones.push({ bone: s.bone, rel: kf.frame, kf: cloneBoneKf(kf) })
+      } else if (s.type === "dope" && clip) {
+        if (timelineTab === "morph" && selectedMorph) {
+          const kf = clip.morphTracks.get(selectedMorph)?.find((k) => k.frame === s.frame)
+          if (kf) next.morphs.push({ morph: selectedMorph, rel: kf.frame, kf: cloneMorphKf(kf) })
+        } else {
+          for (const [bone, track] of clip.boneTracks) {
+            const kf = track.find((k) => k.frame === s.frame)
+            if (kf) next.bones.push({ bone, rel: kf.frame, kf: cloneBoneKf(kf) })
+          }
+        }
+      }
+    }
+
+    const frames = [...next.bones, ...next.morphs, ...next.camera].map((e) => e.rel)
+    if (frames.length === 0) return
+    const base = Math.min(...frames)
+    for (const e of next.bones) e.rel -= base
+    for (const e of next.morphs) e.rel -= base
+    for (const e of next.camera) e.rel -= base
+    clipboard = next
+  }, [clip, cameraTrack, selectedKeyframes, timelineTab, selectedMorph])
+
+  /** Insert the clipboard snapshot with its earliest frame at the playhead,
+   *  replacing any keyframe already on a landing frame. */
+  const pasteAtPlayhead = useCallback(() => {
+    if (!clipboard) return
+    const cb = clipboard
+    const base = Math.round(Math.max(0, currentFrame))
+
+    if (cb.camera.length > 0) {
+      commitCamera((prev) => {
+        const landing = new Set(cb.camera.map((e) => base + e.rel))
+        const next = prev.filter((k) => !landing.has(k.frame))
+        for (const e of cb.camera) next.push({ ...cloneCameraKf(e.kf), frame: base + e.rel })
+        return next
+      })
+    }
+
+    if (cb.bones.length > 0 || cb.morphs.length > 0) {
+      if (!clip) return
+      commit((prev) => {
+        if (!prev) return prev
+        const boneTracks = new Map(prev.boneTracks)
+        const morphTracks = new Map(prev.morphTracks)
+        for (const e of cb.bones) {
+          const frame = base + e.rel
+          const track = (boneTracks.get(e.bone) ?? []).filter((k) => k.frame !== frame)
+          track.push({ ...cloneBoneKf(e.kf), frame })
+          track.sort((a, b) => a.frame - b.frame)
+          boneTracks.set(e.bone, track)
+        }
+        for (const e of cb.morphs) {
+          const frame = base + e.rel
+          const track = (morphTracks.get(e.morph) ?? []).filter((k) => k.frame !== frame)
+          track.push({ ...cloneMorphKf(e.kf), frame })
+          track.sort((a, b) => a.frame - b.frame)
+          morphTracks.set(e.morph, track)
+        }
+        return { ...prev, boneTracks, morphTracks }
+      })
+    }
+
+    // Land selected: the natural next gesture is dragging what was pasted.
+    const isCam = cb.camera.length > 0
+    const landed = [...new Set((isCam ? cb.camera : [...cb.bones, ...cb.morphs]).map((e) => base + e.rel))]
+    setSelectedKeyframes(landed.map((frame) => ({ type: "dope", frame, ...(isCam ? { camera: true } : {}) })))
+  }, [clip, commit, commitCamera, currentFrame, setSelectedKeyframes])
+
+  /** Copy, then delete — one undoable step (the copy touches no history). */
+  const cutSelectedKeyframes = useCallback(() => {
+    copySelectedKeyframes()
+    deleteSelectedKeyframes()
+  }, [copySelectedKeyframes, deleteSelectedKeyframes])
 
   const insertKeyframeAtPlayhead = useCallback(() => {
     const model = modelRef.current
@@ -2054,6 +2171,10 @@ export function StudioPage() {
                 audioDuration={audio?.duration ?? 0}
                 initialView={restoredTimelineView}
                 onViewChange={onTimelineViewChange}
+                onDeleteSelectedKeyframes={deleteSelectedKeyframes}
+                onCopySelectedKeyframes={copySelectedKeyframes}
+                onCutSelectedKeyframes={cutSelectedKeyframes}
+                onPasteAtPlayhead={pasteAtPlayhead}
               />
             )}
           </ResizablePanel>
@@ -2078,6 +2199,10 @@ export function StudioPage() {
                 modelRef={modelRef}
                 onInsertKeyframeAtPlayhead={insertKeyframeAtPlayhead}
                 onDeleteSelectedKeyframes={deleteSelectedKeyframes}
+                onCopySelectedKeyframes={copySelectedKeyframes}
+                onCutSelectedKeyframes={cutSelectedKeyframes}
+                onPasteAtPlayhead={pasteAtPlayhead}
+                canPaste={clipboard !== null}
                 onSimplifySelectedBoneTrack={simplifySelectedBoneTrack}
                 onClearSelectedTrack={clearSelectedTrack}
                 onClearCameraTrack={clearCameraTrack}

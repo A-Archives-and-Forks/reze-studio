@@ -334,6 +334,16 @@ interface PropertiesInspectorProps {
   modelRef: RefObject<Model | null>
   onInsertKeyframeAtPlayhead: () => void
   onDeleteSelectedKeyframes: () => void
+  /** Snapshot the selected keyframes (frames kept relative to the earliest). */
+  onCopySelectedKeyframes: () => void
+  /** Copy, then delete — one undoable step. */
+  onCutSelectedKeyframes: () => void
+  /** Insert the snapshot with its earliest frame at the playhead, replacing
+   *  any keyframe already on a landing frame. */
+  onPasteAtPlayhead: () => void
+  /** Whether the clipboard has anything in it — lives as module state beside
+   *  the ops themselves in <Studio>, not in the reactive store. */
+  canPaste: boolean
   onSimplifySelectedBoneTrack: () => void
   onClearSelectedTrack: () => void
   onClearCameraTrack: () => void
@@ -346,6 +356,10 @@ export const PropertiesInspector = memo(function PropertiesInspector({
   modelRef,
   onInsertKeyframeAtPlayhead,
   onDeleteSelectedKeyframes,
+  onCopySelectedKeyframes,
+  onCutSelectedKeyframes,
+  onPasteAtPlayhead,
+  canPaste,
   onSimplifySelectedBoneTrack,
   onClearSelectedTrack,
   onClearCameraTrack,
@@ -366,15 +380,27 @@ export const PropertiesInspector = memo(function PropertiesInspector({
    *  and let the small <PlayheadFrameLabel/> + <InterpolationSection/> children
    *  subscribe for the handful of visible bits that actually need to update. */
   const playbackFrameRef = usePlaybackFrameRef()
-  const singleSel = selectedKeyframes.length === 1 ? selectedKeyframes[0] : null
   const multiSel = selectedKeyframes.length > 1
 
-  const canDelete = clip && singleSel !== null
+  const canDelete = selectedKeyframes.length > 0
+  const canCopy = selectedKeyframes.length > 0
   const canInsert = !!(clip && (selectedBone || selectedMorph))
   const boneTrackLen = selectedBone && clip ? (clip.boneTracks.get(selectedBone)?.length ?? 0) : 0
   const morphTrackLen = selectedMorph && clip ? (clip.morphTracks.get(selectedMorph)?.length ?? 0) : 0
   const canSimplify = !!(clip && selectedBone && boneTrackLen > 2)
   const canClear = !!(clip && ((selectedBone && boneTrackLen > 0) || (selectedMorph && morphTrackLen > 0)))
+
+  // `secondary` was a generic gray, untuned to this editor's own dark
+  // chrome — Gizmo's own toggle below already builds from
+  // bg-surface-raised/border-line-strong, the tokens the editor actually
+  // themes. Ghost + those tokens is what makes an operations chip look like
+  // it belongs to this panel rather than a default.
+  const opRow =
+    "h-6 flex-1 rounded-chip border border-line-strong bg-surface-raised px-0.5 text-[10px] text-muted-foreground hover:text-foreground"
+  // Delete / Cut / Clear remove something, so they read as a different KIND
+  // of action from Insert/Copy/Paste/Simplify, not just a different label in
+  // the same gray.
+  const destructiveOpRow = cn(opRow, "text-red-400 hover:bg-red-400/10 hover:text-red-400")
 
   const showBoneStats = !!(selectedBone && clip && !selectedMorph && !multiSel)
 
@@ -543,6 +569,11 @@ export const PropertiesInspector = memo(function PropertiesInspector({
           timelineTab={timelineTab}
           setTimelineTab={setTimelineTab}
           onClearCameraTrack={onClearCameraTrack}
+          onCopySelectedKeyframes={onCopySelectedKeyframes}
+          onCutSelectedKeyframes={onCutSelectedKeyframes}
+          onPasteAtPlayhead={onPasteAtPlayhead}
+          canCopy={canCopy}
+          canPaste={canPaste}
         />
       </div>
     )
@@ -613,34 +644,32 @@ export const PropertiesInspector = memo(function PropertiesInspector({
         <div className="space-y-2.5">
           <div className="flex items-center gap-1.5">
             <span className="w-10 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">Key</span>
-            <Button
-              type="button"
-              variant="secondary"
-              size="xs"
-              className="h-6 flex-1 px-0.5 text-[11px]"
-              disabled={!canInsert}
-              onClick={onInsertKeyframeAtPlayhead}
-            >
+            <Button type="button" variant="ghost" size="xs" className={opRow} disabled={!canInsert} onClick={onInsertKeyframeAtPlayhead}>
               Insert
             </Button>
-            <Button
-              type="button"
-              variant="secondary"
-              size="xs"
-              className="h-6 flex-1 px-0.5 text-[11px]"
-              disabled={!canDelete}
-              onClick={onDeleteSelectedKeyframes}
-            >
+            <Button type="button" variant="ghost" size="xs" className={destructiveOpRow} disabled={!canDelete} onClick={onDeleteSelectedKeyframes}>
               Delete
+            </Button>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="w-10 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">Sel</span>
+            <Button type="button" variant="ghost" size="xs" className={opRow} disabled={!canCopy} onClick={onCopySelectedKeyframes}>
+              Copy
+            </Button>
+            <Button type="button" variant="ghost" size="xs" className={destructiveOpRow} disabled={!canCopy} onClick={onCutSelectedKeyframes}>
+              Cut
+            </Button>
+            <Button type="button" variant="ghost" size="xs" className={opRow} disabled={!canPaste} onClick={onPasteAtPlayhead}>
+              Paste
             </Button>
           </div>
           <div className="flex items-center gap-1.5">
             <span className="w-10 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">Track</span>
             <Button
               type="button"
-              variant="secondary"
+              variant="ghost"
               size="xs"
-              className="h-6 flex-1 px-0.5 text-[11px]"
+              className={opRow}
               disabled={!canSimplify}
               onClick={onSimplifySelectedBoneTrack}
               title="Reduce redundant keyframes on the selected bone track"
@@ -649,9 +678,9 @@ export const PropertiesInspector = memo(function PropertiesInspector({
             </Button>
             <Button
               type="button"
-              variant="secondary"
+              variant="ghost"
               size="xs"
-              className="h-6 flex-1 px-0.5 text-[11px]"
+              className={destructiveOpRow}
               disabled={!canClear}
               onClick={onClearSelectedTrack}
               title="Remove all keyframes on the selected bone or morph track"
@@ -1055,13 +1084,26 @@ const CameraSection = memo(function CameraSection({
   timelineTab,
   setTimelineTab,
   onClearCameraTrack,
+  onCopySelectedKeyframes,
+  onCutSelectedKeyframes,
+  onPasteAtPlayhead,
+  canCopy,
+  canPaste,
 }: {
   cameraTrack: readonly CameraKeyframe[]
   commitCamera: ReturnType<typeof useStudioActions>["commitCamera"]
   timelineTab: string
   setTimelineTab: (t: string) => void
   onClearCameraTrack: () => void
+  onCopySelectedKeyframes: () => void
+  onCutSelectedKeyframes: () => void
+  onPasteAtPlayhead: () => void
+  canCopy: boolean
+  canPaste: boolean
 }) {
+  const opRow =
+    "h-6 flex-1 rounded-chip border border-line-strong bg-surface-raised px-0.5 text-[10px] text-muted-foreground hover:text-foreground"
+  const destructiveOpRow = cn(opRow, "text-red-400 hover:bg-red-400/10 hover:text-red-400")
   const playhead = usePlaybackSelector((st) => st.currentFrame)
   const frame = Math.round(Math.max(0, playhead))
 
@@ -1241,9 +1283,9 @@ const CameraSection = memo(function CameraSection({
             <span className="w-10 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">Key</span>
             <Button
               type="button"
-              variant="secondary"
+              variant="ghost"
               size="xs"
-              className="h-6 flex-1 px-0.5 text-[11px]"
+              className={opRow}
               disabled={!!keyAtPlayhead}
               onClick={insertKey}
               title="Key the camera's current pose at the playhead"
@@ -1252,14 +1294,26 @@ const CameraSection = memo(function CameraSection({
             </Button>
             <Button
               type="button"
-              variant="secondary"
+              variant="ghost"
               size="xs"
-              className="h-6 flex-1 px-0.5 text-[11px]"
+              className={destructiveOpRow}
               disabled={!keyAtPlayhead}
               onClick={deleteKey}
               title="Remove the camera keyframe at the playhead"
             >
               Delete
+            </Button>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="w-10 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">Sel</span>
+            <Button type="button" variant="ghost" size="xs" className={opRow} disabled={!canCopy} onClick={onCopySelectedKeyframes}>
+              Copy
+            </Button>
+            <Button type="button" variant="ghost" size="xs" className={destructiveOpRow} disabled={!canCopy} onClick={onCutSelectedKeyframes}>
+              Cut
+            </Button>
+            <Button type="button" variant="ghost" size="xs" className={opRow} disabled={!canPaste} onClick={onPasteAtPlayhead}>
+              Paste
             </Button>
           </div>
           <div className="flex items-center gap-1.5">
@@ -1271,9 +1325,9 @@ const CameraSection = memo(function CameraSection({
                 Operations block a different shape from the bone one. */}
             <Button
               type="button"
-              variant="secondary"
+              variant="ghost"
               size="xs"
-              className="h-6 flex-1 px-0.5 text-[11px]"
+              className={opRow}
               disabled
               title="Simplify applies to dense bone tracks — a camera's keys are its cuts"
             >
@@ -1281,9 +1335,9 @@ const CameraSection = memo(function CameraSection({
             </Button>
             <Button
               type="button"
-              variant="secondary"
+              variant="ghost"
               size="xs"
-              className="h-6 flex-1 px-0.5 text-[11px]"
+              className={destructiveOpRow}
               disabled={cameraTrack.length === 0}
               onClick={onClearCameraTrack}
               title="Remove every camera keyframe"
