@@ -980,8 +980,10 @@ export function StudioPage() {
         e.preventDefault()
         setPlaying((p) => !p)
       }
-      if (e.code === "ArrowLeft") setCurrentFrame((p) => Math.max(0, Math.round(p) - 1))
-      if (e.code === "ArrowRight") setCurrentFrame((p) => Math.min(frameCount, Math.round(p) + 1))
+      // ArrowLeft/Right are Timeline's own window listener now — it jumps
+      // between keyframes when something's selected and falls back to this
+      // same plain nudge otherwise, so there is exactly one handler deciding
+      // what the arrows do instead of two racing on the same keydown.
       if (e.code === "Home") setCurrentFrame(0)
       if (e.code === "End") setCurrentFrame(frameCount)
       // Undo / redo. Cmd on macOS, Ctrl elsewhere. Shift+Z (or Ctrl+Y) is redo.

@@ -2191,15 +2191,17 @@ function TimelineCanvas({
 
   // Keyframe-jump arrows: a WINDOW listener, not the canvas's own onKeyDown —
   // people expect Left/Right to walk keyframes the moment something is picked,
-  // without first clicking into the timeline to give the canvas focus. Gated
-  // on a subject actually being selected, so the arrows don't hijack
-  // navigation elsewhere in the editor. The scrub slider keeps its own
-  // separate ArrowLeft/Right (plain frame-nudge) on its own focus — reaching
-  // it by Tab is deliberate enough that stepping frames there instead of
-  // jumping keys is exactly what it should do.
-  const cameraSelected = useStudioSelector((s) => s.cameraSelected)
+  // without first clicking into the timeline to give the canvas focus. No
+  // selection gate — this timeline has no fold/collapse, it's always the
+  // thing Left/Right means, and the frames.length===0 branch below already
+  // reproduces studio.tsx's old plain-nudge for the nothing-selected case
+  // (that handler's own ArrowLeft/Right is removed in favour of this one, so
+  // there's exactly one listener deciding what the arrows do, not two racing
+  // on the same keydown). The scrub slider keeps its own separate
+  // ArrowLeft/Right (plain frame-nudge) on its own focus — reaching it by Tab
+  // is deliberate enough that stepping frames there instead of jumping keys
+  // is exactly what it should do.
   useEffect(() => {
-    if (!selectedBone && !selectedMorph && !cameraSelected) return
     const onGlobalKey = (e: KeyboardEvent) => {
       if (e.metaKey || e.ctrlKey || e.altKey) return
       if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return
@@ -2223,7 +2225,7 @@ function TimelineCanvas({
     }
     window.addEventListener("keydown", onGlobalKey)
     return () => window.removeEventListener("keydown", onGlobalKey)
-  }, [selectedBone, selectedMorph, cameraSelected, getDopeFrames, onSetCurrentFrame, frameCount])
+  }, [getDopeFrames, onSetCurrentFrame, frameCount])
 
   return (
     <canvas
