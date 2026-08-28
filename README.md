@@ -34,13 +34,14 @@ A modern, web-native take on MMD animation editing — a dedicated timeline and 
 - [x] Morph weight keyframing
 - [x] Undo / redo for clip edits
 - [x] Track operations: simplify (keyframe reduction), clear
+- [x] Marquee-select and batch drag/copy/cut/paste across bones, morphs and camera keys
 - [x] Keyboard shortcuts
 - [x] Unsaved-change warning on tab close / refresh
 - [x] Viewport bone pick (double-click) + 3D transform gizmo drag
 - [x] Material pick in Materials panel with highlight outline
 - [ ] Animation layers with blend weights and bone masks
 - [ ] Custom bone groups with mute / solo toggle
-- [ ] Clip operations: cut, copy, paste, mirrored paste (左↔右), import, time stretch
+- [ ] Mirrored paste (左↔右), clip import (merge another take's keys in), time stretch
 - [ ] Mocap import (video → VMD)
 - [ ] Overleaf-style real-time collaboration
 - [ ] AI-assisted animation (generative infill, motion retargeting)
@@ -59,11 +60,11 @@ If you've never hand-keyed an animation before, here's the mental model. A clip 
 
 A typical workflow in Reze Studio:
 
-1. **Pick a bone.** Click it in the left panel, the dopesheet, or **double-click the model** in the viewport. The Properties Inspector on the right shows its rotation / translation and every keyframe on that bone, and a rings+axes gizmo appears at the bone in 3D.
-2. **Scrub to a frame.** Drag the playhead in the timeline, or use `←` / `→` to step frame by frame. The viewport updates live.
+1. **Pick a bone.** Click it in the left panel, the dopesheet, or **double-click the model** in the viewport. The Properties Inspector on the right shows its rotation / translation and every keyframe on that bone. Double-clicking the bone in the viewport also drops a rings+axes gizmo on it (double-click empty space, or the Gizmo toggle in the inspector, to hide it again).
+2. **Scrub to a frame.** Drag the playhead in the timeline, or use `←` / `→` to jump to the selected bone's (or morph's, or camera's) previous / next keyframe — with nothing keyed yet, the arrows just step one frame at a time. The viewport updates live.
 3. **Pose the bone.** Drag the rotation / translation sliders in the inspector, type a number directly, or **drag the viewport gizmo** (rings rotate, axes translate). Either path writes to the same keyframe at the current frame — if none exists, one is inserted automatically. Each drag gesture lands as a single undoable edit.
 4. **Shape the motion between keyframes.** Select a keyframe in the dopesheet and open the curve editor tab. Each channel (rotX, rotY, rotZ, tX, tY, tZ) has its own Bézier curve — drag the handles to change easing. This is where "stiff" animation becomes "alive."
-5. **Delete / nudge / drag keyframes.** In the dopesheet you can drag diamonds sideways to retime, or select and delete. Arrow keys nudge by one frame.
+5. **Select, drag, delete keyframes.** Drag a diamond sideways to retime it, or marquee-drag across empty dopesheet space to select several at once — in the curve editor a marquee catches handles by frame *and* value. Grab anywhere inside a selection's box (not just an exact key) to drag the whole batch together; `Delete` removes it, `Ctrl/⌘+C`/`X`/`V` copy, cut, and paste it at the playhead. A dope selection and a curve selection are mutually exclusive — starting one drops the other.
 6. **Clean up a track.** In the Properties Inspector, `Simplify` removes redundant keyframes on the selected bone (keys that the Bézier between their neighbours already reproduces within a small rotation / translation tolerance). `Clear` wipes the track entirely. Both are undoable.
 7. **Undo mistakes.** `Ctrl/⌘+Z` rewinds the last clip edit; `Ctrl/⌘+Shift+Z` (or `⌘+Y`) redoes. History holds the last 100 edits. Loading a new VMD or PMX does _not_ go on the history stack — it would desync the loaded model.
 8. **Inspect materials.** Open the Materials tab (right panel) and click a material name to highlight it in the viewport — useful for sanity-checking which mesh is which. Click the same name or any blank area in the list to clear. Material selection is mutually exclusive with bone/morph selection.
@@ -71,21 +72,25 @@ A typical workflow in Reze Studio:
 
 ## Keyboard shortcuts
 
-| Key                                   | Action                               |
-| ------------------------------------- | ------------------------------------ |
-| `Space`                               | Play / pause                         |
-| `←` / `→`                             | Step one frame back / forward        |
-| `Home`                                | Jump to first frame                  |
-| `End`                                 | Jump to last frame                   |
-| `Ctrl` / `⌘` + `Z`                    | Undo last clip edit                  |
-| `Ctrl` / `⌘` + `Shift` + `Z`, `⌘`+`Y` | Redo                                 |
-| `←` / `→` _(in frame input)_          | Decrement / increment playhead frame |
-| `Shift` + mouse wheel                 | Zoom the value / Y axis              |
-| `Ctrl` / `Command` + mouse wheel      | Zoom the time / X axis               |
+| Key                                   | Action                                                    |
+| ------------------------------------- | ---------------------------------------------------------- |
+| `Space`                               | Play / pause                                                |
+| `←` / `→`                             | Jump to the previous / next keyframe (else step one frame)  |
+| `Home`                                | Jump to first frame                                         |
+| `End`                                 | Jump to last frame                                           |
+| `Delete` / `Backspace`                | Delete the selected keyframe(s)                              |
+| `Ctrl` / `⌘` + `C`                    | Copy the selected keyframe(s)                                |
+| `Ctrl` / `⌘` + `X`                    | Cut the selected keyframe(s)                                 |
+| `Ctrl` / `⌘` + `V`                    | Paste at the playhead                                        |
+| `Ctrl` / `⌘` + `Z`                    | Undo last clip edit                                          |
+| `Ctrl` / `⌘` + `Shift` + `Z`, `⌘`+`Y` | Redo                                                          |
+| `←` / `→` _(in frame input)_          | Decrement / increment playhead frame                          |
+| `Shift` + mouse wheel                 | Zoom the value / Y axis                                       |
+| `Ctrl` / `Command` + mouse wheel      | Zoom the time / X axis                                        |
 
 ## Tech stack
 
-- **Engine:** [reze-engine](https://github.com/AmyangXYZ/reze-engine) v0.15 — WebGPU renderer, in-house TypeScript port of Bullet physics, IK solver
+- **Engine:** [reze-engine](https://github.com/AmyangXYZ/reze-engine) v0.50 — WebGPU renderer, in-house TypeScript port of Bullet physics, IK solver
 - **Editor:** Next.js 16, React 19, TypeScript, shadcn/ui, Tailwind
 
 ---
