@@ -42,7 +42,9 @@ import { clearModelUpload, loadModelUpload } from "@/lib/model-store"
  */
 const ASSETS = process.env.NODE_ENV === "production" ? "https://assets.reze.one/demo/reze-studio" : ""
 
-export const MODEL_PATH = `${ASSETS}/models/塞尔凯特/塞尔凯特.pmx`
+/** The cast, shared by every site — its own name under demo/ rather than a
+ *  copy in each site's folder, so retuning the figure is one upload. */
+export const MODEL_PATH = "https://assets.reze.one/demo/reze/reze.pmx"
 export const VMD_PATH = `${ASSETS}/animations/Classic.vmd`
 /** The shot and the song that ship with the demo motion — one scene, so they
  *  arrive together on a fresh boot rather than leaving the dance unscored. */
