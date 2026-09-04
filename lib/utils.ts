@@ -107,6 +107,19 @@ export function clipRetainedForModel(
   return { boneTracks, morphTracks, ikTracks, frameCount: end }
 }
 
+/**
+ * What the IK switch reads for a clip: on unless the clip switches a chain off.
+ *
+ * The switch is a blanket one and the clip's `ikTracks` are its record, so this
+ * is the round trip: activate a clip that arrived with its feet off and the
+ * menu says so.
+ */
+export function clipIkEnabled(clip: AnimationClip | null | undefined): boolean {
+  if (!clip?.ikTracks) return true
+  for (const track of clip.ikTracks.values()) if (track.some((k) => !k.enabled)) return false
+  return true
+}
+
 // ─── Keyframe insert + engine pose read/write ────────────────────────────
 /** Default VMD-style linear-ish handles (127-space). */
 export const VMD_LINEAR_DEFAULT_IP: BoneInterpolation = {

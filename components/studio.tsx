@@ -81,6 +81,7 @@ import {
 } from "@/components/engine-bridge"
 import { StudioStatusOverlay, useStudioStatusActions } from "@/components/studio-status"
 import {
+  clipIkEnabled,
   clipRetainedForModel,
   cloneBoneInterpolation,
   emptyStudioClip,
@@ -1722,11 +1723,11 @@ export function StudioPage() {
   }, [clip, ikEnabled, setIkEnabled, commit])
 
   const syncStudioAfterNewClip = useCallback(
-    (model: Model) => {
+    (model: Model, clip: AnimationClip) => {
       setCurrentFrame(0)
       setPlaying(false)
       setSelectedKeyframes([])
-      setIkEnabled(true)
+      setIkEnabled(clipIkEnabled(clip))
       setClipVersion((v) => v + 1)
       model.show(STUDIO_ANIM_NAME)
       model.seek(0)
@@ -2062,7 +2063,7 @@ export function StudioPage() {
         const c = model.getClip(STUDIO_ANIM_NAME)
         if (c) {
           openClip(sanitizeClipFilenameBase(fileStem(file.name)), c)
-          syncStudioAfterNewClip(model)
+          syncStudioAfterNewClip(model, c)
         }
       } catch (err) {
         window.alert(err instanceof Error ? err.message : String(err))
@@ -2125,13 +2126,14 @@ export function StudioPage() {
       activateClip(id)
       setCurrentFrame(0)
       setSelectedKeyframes([])
+      setIkEnabled(clipIkEnabled(libraryRef.current.find((c) => c.id === id)?.clip))
       setClipVersion((v) => v + 1)
       // Out to the arrangement: you asked about a CLIP, and where it sits is
       // the thing a clip has that its keyframes do not. Picking a bone from
       // here drills straight back in.
       setTimelineMode("arrange")
     },
-    [activeClipId, activateClip, setPlaying, setCurrentFrame, setSelectedKeyframes],
+    [activeClipId, activateClip, setPlaying, setCurrentFrame, setSelectedKeyframes, setIkEnabled],
   )
 
   const onRemoveClip = useCallback(
@@ -2343,7 +2345,7 @@ export function StudioPage() {
       const c = model.getClip(STUDIO_ANIM_NAME)
       if (c) {
         openClip(sanitizeClipFilenameBase(fileStem(VMD_PATH)), c)
-        syncStudioAfterNewClip(model)
+        syncStudioAfterNewClip(model, c)
       }
       // The demo scene is four files, so a reset that stopped at the motion left
       // most of it missing — no expressions, no shot, no music. Each in its own

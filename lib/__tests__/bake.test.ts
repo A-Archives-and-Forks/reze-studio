@@ -1,6 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import type { AnimationClip, BoneKeyframe } from "reze-engine"
+import type { AnimationClip, BoneKeyframe, IkKeyframe } from "reze-engine"
 import { Quat, Vec3 } from "reze-engine"
 import { bakeProject } from "../bake"
 import {
@@ -32,6 +32,14 @@ function boneClip(name: string, frames: number[], degPerFrame = 0.5, frameCount?
     morphTracks: new Map(),
     frameCount: frameCount ?? Math.max(...frames),
   }
+}
+
+/** A clip that drives an IK bone, with the flags a real motion carries beside
+ *  it — or without them, which is the ordinary case and means the chain solves. */
+function ikClip(name: string, frames: number[], flags?: IkKeyframe[]): AnimationClip {
+  const clip = boneClip(name, frames, 0.5)
+  if (flags) clip.ikTracks = new Map([[name, flags]])
+  return clip
 }
 
 function morphClip(name: string, frames: number[]): AnimationClip {
@@ -283,4 +291,89 @@ test("a gap between two placements holds the pose, and the ends do not", () => {
   // The ends still bound it: nothing before the first, nothing after the last.
   assert.ok(Quat.angleTo(evalBoneTrackAt(wrist, 0).rotation, rest) < 1e-6, "the pose arrived before the clip")
   assert.ok(Quat.angleTo(evalBoneTrackAt(wrist, 380).rotation, rest) < 1e-6, "the pose outlived the clip")
+})
+
+test("a clip that never mentions IK switches it back on", () => {
+  // A motion with its feet switched off, then an ordinary dance after it. The
+  // dance says nothing about 左足ＩＫ, which in MMD means the chain solves — so
+  // the arrangement has to say so, or the dance inherits the off and walks the
+  // whole take on stiff legs.
+  const off = ikClip("左足ＩＫ", [0, 60], [{ frame: 0, enabled: false }])
+  const plain = ikClip("左足ＩＫ", [0, 60])
+
+  let project: Project = { name: "p", library: [], tracks: [] }
+  const lane = addTrack(project, "Motion")
+  project = lane.project
+  const a = addClip(project, "off", off)
+  project = a.project
+  const b = addClip(project, "plain", plain)
+  project = b.project
+  project = addPlacement(project, lane.trackId, a.clipId, 0).project
+  project = addPlacement(project, lane.trackId, b.clipId, 100).project
+
+  assert.deepEqual(bakeProject(project).ikTracks?.get("左足ＩＫ"), [
+    { frame: 0, enabled: false },
+    { frame: 100, enabled: true },
+  ])
+})
+
+test("a clip that drives no IK chain leaves the one underneath alone", () => {
+  // The other half of the same rule. Silence means "solving" only for a clip
+  // that is actually driving the chain — a face laid over a dance is not, and
+  // switching the dance's feet back on under it would be the mirror bug.
+  const dance = ikClip("左足ＩＫ", [0, 200], [{ frame: 0, enabled: false }])
+  const face = morphClip("まばたき", [0, 60])
+
+  let project: Project = { name: "p", library: [], tracks: [] }
+  const top = addTrack(project, "Face")
+  project = top.project
+  const bottom = addTrack(project, "Motion")
+  project = bottom.project
+  const f = addClip(project, "face", face)
+  project = f.project
+  const d = addClip(project, "dance", dance)
+  project = d.project
+  project = addPlacement(project, top.trackId, f.clipId, 40).project
+  project = addPlacement(project, bottom.trackId, d.clipId, 0).project
+
+  assert.deepEqual(bakeProject(project).ikTracks?.get("左足ＩＫ"), [{ frame: 0, enabled: false }])
+})
+
+test("a chain that solves the whole way through leaves no keys", () => {
+  // Two ordinary motions compose into an ordinary motion: no IK block, the
+  // same file the studio exported before any of this existed.
+  const one = ikClip("左足ＩＫ", [0, 60])
+  const two = ikClip("右足ＩＫ", [0, 60])
+
+  let project: Project = { name: "p", library: [], tracks: [] }
+  const lane = addTrack(project, "Motion")
+  project = lane.project
+  const a = addClip(project, "one", one)
+  project = a.project
+  const b = addClip(project, "two", two)
+  project = b.project
+  project = addPlacement(project, lane.trackId, a.clipId, 0).project
+  project = addPlacement(project, lane.trackId, b.clipId, 100).project
+
+  assert.equal(bakeProject(project).ikTracks, undefined)
+})
+
+test("a clip's IK solves until its own flag says otherwise", () => {
+  // The flag arrives at frame 50, so frames 0-49 solve: the state before a
+  // chain's first key is the one MMD leaves it in, not that key's own.
+  const late = ikClip("左足ＩＫ", [0, 120], [{ frame: 50, enabled: false }])
+  const project = newProjectWith("late", late)
+
+  assert.deepEqual(bakeProject(project).ikTracks?.get("左足ＩＫ"), [{ frame: 50, enabled: false }])
+})
+
+test("a trim carries the IK state in force where it starts", () => {
+  // Cutting the front off a clip cuts off the frame that switched IK on or off
+  // — the state it established has to arrive on the new first frame instead.
+  const late = ikClip("左足ＩＫ", [0, 120], [{ frame: 50, enabled: false }])
+  let project = newProjectWith("late", late)
+  const id = project.tracks[0].placements[0].id
+  project = trimPlacement(project, id, { in: 80 })
+
+  assert.deepEqual(bakeProject(project).ikTracks?.get("左足ＩＫ"), [{ frame: 80, enabled: false }])
 })

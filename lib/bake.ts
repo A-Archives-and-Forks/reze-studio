@@ -35,6 +35,15 @@
 // answer: it HOLDS the pose the previous one ended on. Snapping to rest there
 // would be two lurches — out of the pose and back into the next one — across a
 // stretch where the arrangement is not asking for anything to happen.
+//
+// IK IS A STATE, NOT A POSE, so silence about it is itself an answer. A VMD
+// that says nothing about 左足ＩＫ plays with that chain SOLVING, because that
+// is where MMD leaves it — so a dance laid after a motion that switched the
+// feet off has to say "on" somewhere, or it inherits the off and walks the
+// whole take on stiff legs. What it must not do is say "on" for chains it is
+// not driving, or a face-only clip on the top track would switch the feet back
+// on underneath it. So a clip owns a chain exactly where it DRIVES that chain:
+// it keys the flag, or it keys the IK bone itself.
 
 import type { AnimationClip, BoneInterpolation, BoneKeyframe, IkKeyframe, MorphKeyframe } from "reze-engine"
 import { Vec3 } from "reze-engine"
@@ -69,6 +78,19 @@ function tracksOfKind(clip: AnimationClip, kind: TrackKind): Map<string, unknown
 }
 
 /**
+ * Whether `clip` has anything to say about `name`.
+ *
+ * For bones and morphs that is exactly "does it key that track" — a clip with
+ * no 左手首 keys leaves the wrist to whatever is under it. IK asks the wider
+ * question, because a clip driving a chain has an opinion on its solve state
+ * whether or not it wrote one down, and that unwritten opinion is `true`.
+ */
+function drives(clip: AnimationClip, kind: TrackKind, name: string): boolean {
+  if ((tracksOfKind(clip, kind)?.get(name)?.length ?? 0) > 0) return true
+  return kind === "ik" && (clip.boneTracks.get(name)?.length ?? 0) > 0
+}
+
+/**
  * Which placement owns `name` over which arrangement frames.
  *
  * Walks tracks top to bottom, and each track claims only the frames still
@@ -83,8 +105,7 @@ function ownershipIntervals(project: Project, kind: TrackKind, name: string): In
     for (const placement of track.placements) {
       const lib = clipById(project, placement.clipId)
       if (!lib) continue
-      const keys = tracksOfKind(lib.clip, kind)?.get(name)
-      if (!keys || keys.length === 0) continue
+      if (!drives(lib.clip, kind, name)) continue
       const from = placement.start
       const to = placementEnd(placement, lib.clip)
       if (to <= from) continue
@@ -223,16 +244,25 @@ function bakeMorphInterval(interval: Interval, name: string, hasFollower: boolea
   return out
 }
 
+/**
+ * The IK flags `interval` contributes, in arrangement frames.
+ *
+ * The opening key is written even when the source carries no flags at all —
+ * that is the point. An interval reaching this function drives the chain, so it
+ * has a state to declare at its own start, and a clip that never mentions the
+ * chain declares the one it would play with on its own: solving.
+ */
 function bakeIkInterval(interval: Interval, name: string): IkKeyframe[] {
   const { from, to, placement, clip } = interval
-  const source = clip.ikTracks?.get(name)
-  if (!source || source.length === 0) return []
+  const source = clip.ikTracks?.get(name) ?? []
   const offset = offsetOf(placement)
   const localFrom = from - offset
   const localLast = to - 1 - offset
   // IK keys are steps: the state holds until the next one changes it, so the
   // boundary carries whatever was in force there and the rest copy across.
-  let state = source[0].enabled
+  // Ahead of the first key the chain solves — a trim starting before one takes
+  // that, not the key's own state.
+  let state = true
   for (const k of source) {
     if (k.frame <= localFrom) state = k.enabled
     else break
@@ -241,6 +271,26 @@ function bakeIkInterval(interval: Interval, name: string): IkKeyframe[] {
   for (const k of source) {
     if (k.frame <= localFrom || k.frame > localLast) continue
     out.push({ frame: k.frame + offset, enabled: k.enabled })
+  }
+  return out
+}
+
+/**
+ * The flat track, reduced to the moments the state actually changes.
+ *
+ * A player reading this reaches every frame the same way the bake did: solving
+ * until told otherwise, then holding each flag until the next. So a key
+ * restating the state already in force is one the file does not need, and a
+ * chain that solves the whole way through leaves no keys at all, so an
+ * arrangement of ordinary motions exports as an ordinary motion.
+ */
+function ikTransitions(keys: IkKeyframe[]): IkKeyframe[] {
+  const out: IkKeyframe[] = []
+  let state = true
+  for (const k of keys) {
+    if (k.enabled === state) continue
+    out.push(k)
+    state = k.enabled
   }
   return out
 }
@@ -378,7 +428,7 @@ export function bakeName(
     }))
     return dedupe([...keys, ...edgeKeys])
   }
-  return dedupe(intervals.flatMap((i) => bakeIkInterval(i, name)))
+  return ikTransitions(dedupe(intervals.flatMap((i) => bakeIkInterval(i, name))))
 }
 
 /** The last frame any placement reaches. Not `projectEnd`, which floors at a
