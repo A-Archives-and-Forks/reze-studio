@@ -141,6 +141,8 @@ export function EngineBridge({
   const {
     commit,
     replaceClip,
+    openClip,
+    restoreLibrary,
     setClipDisplayName,
     setSelectedBone,
     setSelectedMorph,
@@ -465,10 +467,16 @@ export function EngineBridge({
             const boneSet = new Set(model.getSkeleton().bones.map((b) => b.name))
             const morphSet = new Set(model.getMorphing().morphs.map((m) => m.name))
             const materialSet = new Set(model.getMaterials().map((m) => m.name))
-            const clip = clipRetainedForModel(draft.clip, boneSet, morphSet)
+            // The whole library comes back, each clip filtered onto whatever
+            // model actually booted — the two can have drifted apart since the
+            // draft was written.
+            const restored = draft.library.map((e) => ({
+              ...e,
+              clip: clipRetainedForModel(e.clip, boneSet, morphSet),
+            }))
+            restoreLibrary(restored, draft.activeClipId)
+            const clip = (restored.find((e) => e.id === draft.activeClipId) ?? restored[0]).clip
             model.loadClip(STUDIO_ANIM_NAME, clip)
-            replaceClip(clip)
-            setClipDisplayName(draft.clipDisplayName)
             model.show(STUDIO_ANIM_NAME)
             const restoredFrame = Math.min(Math.max(0, draft.currentFrame ?? 0), Math.max(0, clip.frameCount))
             model.seek(restoredFrame / 30)
@@ -523,8 +531,7 @@ export function EngineBridge({
             if (disposed) return
             const c = model?.getClip(STUDIO_ANIM_NAME)
             if (c) {
-              replaceClip(c)
-              setClipDisplayName(sanitizeClipFilenameBase(fileStem(VMD_PATH)))
+              openClip(sanitizeClipFilenameBase(fileStem(VMD_PATH)), c)
               model?.show(STUDIO_ANIM_NAME)
               model?.seek(0)
               lastSeekFrameRef.current = 0
@@ -560,8 +567,7 @@ export function EngineBridge({
           // applyLoadedPmxModel).
           const fresh = emptyStudioClip()
           model.loadClip(STUDIO_ANIM_NAME, fresh)
-          replaceClip(fresh)
-          setClipDisplayName(sanitizeClipFilenameBase(restoredStem))
+          openClip(sanitizeClipFilenameBase(restoredStem), fresh)
           model.show(STUDIO_ANIM_NAME)
           model.seek(0)
           lastSeekFrameRef.current = 0

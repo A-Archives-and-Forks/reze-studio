@@ -26,6 +26,7 @@ import {
   readLocalPoseAfterSeek,
   VMD_LINEAR_DEFAULT_IP,
 } from "@/lib/utils"
+import { useT, type Dictionary } from "@/lib/i18n"
 import { useStudioActions, useStudioSelector } from "@/context/studio-context"
 import { usePlaybackFrameRef, usePlaybackSelector } from "@/context/playback-context"
 
@@ -90,12 +91,51 @@ function findKeyframeAt(clip: AnimationClip, bone: string, frame: number): BoneK
 
 type IpTab = "rot" | "tx" | "ty" | "tz"
 
+/** Same rhythm as the timeline's channel strip: the group leads, its axes
+ *  follow in their own hues. Rotation has no axes here because VMD eases a
+ *  bone's whole rotation on ONE curve — the three axis tabs in the timeline let
+ *  you read each component, but there is only one set of handles to drag. */
 const BONE_IP_TABS = [
-  { key: "rot", label: "Rotation" },
-  { key: "tx", label: "Trans X" },
-  { key: "ty", label: "Trans Y" },
-  { key: "tz", label: "Trans Z" },
+  { key: "rot", label: "Rotation", color: null, sep: false },
+  { key: "_ipSep", label: "", color: null, sep: true },
+  { key: "tx", label: "Trans X", color: "#e2a055", sep: false },
+  { key: "ty", label: "Trans Y", color: "#55bba0", sep: false },
+  { key: "tz", label: "Trans Z", color: "#7755dd", sep: false },
 ] as const
+
+/**
+ * A curve tab's label, in the reader's language.
+ *
+ * Built from the timeline's own words rather than a second set of keys: these
+ * name the same channels the timeline strip names, and two dictionaries for one
+ * vocabulary is how "Translation" here ends up disagreeing with "位移" there.
+ * The axis letter is appended rather than translated — it is the same letter
+ * everywhere, and it has to match the coloured chip beside it.
+ */
+function ipTabLabel(t: Dictionary, label: string): string {
+  switch (label) {
+    case "Rotation":
+      return t.timeline.rotation
+    case "Trans X":
+      return `${t.timeline.translation} X`
+    case "Trans Y":
+      return `${t.timeline.translation} Y`
+    case "Trans Z":
+      return `${t.timeline.translation} Z`
+    case "Tgt X":
+      return `${t.timeline.target} X`
+    case "Tgt Y":
+      return `${t.timeline.target} Y`
+    case "Tgt Z":
+      return `${t.timeline.target} Z`
+    case "Distance":
+      return t.timeline.distance
+    case "FOV":
+      return t.timeline.fov
+    default:
+      return label
+  }
+}
 
 function interpolationPairFromTab(kf: BoneKeyframe, tab: IpTab): [CurvePoint, CurvePoint] | null {
   let row: { x: number; y: number }[] | undefined
@@ -367,6 +407,7 @@ export const PropertiesInspector = memo(function PropertiesInspector({
   setTimelineTab,
   clipVersion,
 }: PropertiesInspectorProps) {
+  const t = useT()
   const clip = useStudioSelector((s) => s.clip)
   const selectedBone = useStudioSelector((s) => s.selectedBone)
   const selectedMorph = useStudioSelector((s) => s.selectedMorph)
@@ -628,7 +669,7 @@ export const PropertiesInspector = memo(function PropertiesInspector({
             </div>
             <PlayheadFrameLabel frameCount={clip?.frameCount ?? null} />
           </div>
-          <div className="mb-2 text-[10px] font-medium uppercase tracking-[0.06em] text-muted-foreground">Weight</div>
+          <div className="mb-2 text-[10px] font-medium uppercase tracking-[0.06em] text-muted-foreground">{t.inspector.weight}</div>
           <LiveMorphSlider
             modelRef={modelRef}
             selectedMorph={selectedMorph}
@@ -640,31 +681,31 @@ export const PropertiesInspector = memo(function PropertiesInspector({
       ) : null}
 
       <section className="space-y-2 pt-2.5">
-        <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Operations</div>
+        <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">{t.inspector.operations}</div>
         <div className="space-y-2.5">
           <div className="flex items-center gap-1.5">
-            <span className="w-10 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">Key</span>
+            <span className="w-10 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">{t.inspector.groupKey}</span>
             <Button type="button" variant="ghost" size="xs" className={opRow} disabled={!canInsert} onClick={onInsertKeyframeAtPlayhead}>
-              Insert
+              {t.inspector.insert}
             </Button>
             <Button type="button" variant="ghost" size="xs" className={destructiveOpRow} disabled={!canDelete} onClick={onDeleteSelectedKeyframes}>
-              Delete
+              {t.inspector.delete}
             </Button>
           </div>
           <div className="flex items-center gap-1.5">
-            <span className="w-10 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">Sel</span>
+            <span className="w-10 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">{t.inspector.groupSel}</span>
             <Button type="button" variant="ghost" size="xs" className={opRow} disabled={!canCopy} onClick={onCopySelectedKeyframes}>
-              Copy
+              {t.inspector.copy}
             </Button>
             <Button type="button" variant="ghost" size="xs" className={destructiveOpRow} disabled={!canCopy} onClick={onCutSelectedKeyframes}>
-              Cut
+              {t.inspector.cut}
             </Button>
             <Button type="button" variant="ghost" size="xs" className={opRow} disabled={!canPaste} onClick={onPasteAtPlayhead}>
-              Paste
+              {t.inspector.paste}
             </Button>
           </div>
           <div className="flex items-center gap-1.5">
-            <span className="w-10 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">Track</span>
+            <span className="w-10 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">{t.inspector.groupTrack}</span>
             <Button
               type="button"
               variant="ghost"
@@ -672,9 +713,9 @@ export const PropertiesInspector = memo(function PropertiesInspector({
               className={opRow}
               disabled={!canSimplify}
               onClick={onSimplifySelectedBoneTrack}
-              title="Reduce redundant keyframes on the selected bone track"
+              title={t.inspector.simplifyTitle}
             >
-              Simplify
+              {t.inspector.simplify}
             </Button>
             <Button
               type="button"
@@ -683,9 +724,9 @@ export const PropertiesInspector = memo(function PropertiesInspector({
               className={destructiveOpRow}
               disabled={!canClear}
               onClick={onClearSelectedTrack}
-              title="Remove all keyframes on the selected bone or morph track"
+              title={t.inspector.clearTitle}
             >
-              Clear
+              {t.inspector.clear}
             </Button>
           </div>
           {/* The gizmo is off until asked for — it stands between the camera and
@@ -697,7 +738,7 @@ export const PropertiesInspector = memo(function PropertiesInspector({
               rather than the action: a "Hide" that becomes "Show" reads as a
               command and leaves you guessing which word describes right now. */}
           <div className="flex items-center gap-1.5">
-            <span className="w-10 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">Gizmo</span>
+            <span className="w-10 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">{t.inspector.groupGizmo}</span>
             <Button
               type="button"
               variant="ghost"
@@ -705,11 +746,7 @@ export const PropertiesInspector = memo(function PropertiesInspector({
               aria-pressed={gizmoVisible}
               disabled={!selectedBone}
               onClick={() => setGizmoVisible((v) => !v)}
-              title={
-                gizmoVisible
-                  ? "Hide the transform gizmo (or dblclick empty space in the viewport)"
-                  : "Show the transform gizmo on the selected bone (or dblclick the bone in the viewport)"
-              }
+              title={gizmoVisible ? t.inspector.gizmoHide : t.inspector.gizmoShow}
               className={cn(
                 "h-6 flex-1 border px-0.5 text-[11px]",
                 gizmoVisible
@@ -717,7 +754,7 @@ export const PropertiesInspector = memo(function PropertiesInspector({
                   : "border-line-strong bg-surface-raised text-muted-foreground hover:text-foreground",
               )}
             >
-              {gizmoVisible ? "Visible" : "Hidden"}
+              {gizmoVisible ? t.inspector.visible : t.inspector.hidden}
             </Button>
           </div>
         </div>
@@ -749,10 +786,11 @@ function LiveBoneSliders({
   applyTranslationAxis: (axisIdx: 0 | 1 | 2, v: number, mode: "preview" | "commit") => void
   traRange: { min: number; max: number }
 }) {
+  const t = useT()
   const livePose = useLivePose(modelRef, selectedBone, clip)
   return (
     <>
-      <div className="mb-2 text-[10px] font-medium uppercase tracking-[0.06em] text-muted-foreground">Rotation (°)</div>
+      <div className="mb-2 text-[10px] font-medium uppercase tracking-[0.06em] text-muted-foreground">{t.inspector.rotationDeg}</div>
       {livePose ? (
         ROT_CHANNELS.map((ch, i) => (
           <AxisSliderRow
@@ -772,11 +810,11 @@ function LiveBoneSliders({
           />
         ))
       ) : (
-        <div className="text-[11px] text-muted-foreground">—</div>
+        <div className="text-[11px] text-muted-foreground">{t.inspector.none}</div>
       )}
 
       <div className="mb-2 mt-3 text-[10px] font-medium uppercase tracking-[0.06em] text-muted-foreground">
-        Translation
+        {t.inspector.translation}
       </div>
       {livePose ? (
         TRA_CHANNELS.map((ch, i) => (
@@ -797,7 +835,7 @@ function LiveBoneSliders({
           />
         ))
       ) : (
-        <div className="text-[11px] text-muted-foreground">—</div>
+        <div className="text-[11px] text-muted-foreground">{t.inspector.none}</div>
       )}
     </>
   )
@@ -834,12 +872,43 @@ function LiveMorphSlider({
   )
 }
 
-/** Subscribes to the playhead so the parent <PropertiesInspector/> doesn't have to. */
+/**
+ * Subscribes to the playhead so the parent <PropertiesInspector/> doesn't have
+ * to — and, while the clip is running, stops subscribing at all.
+ *
+ * Transport state deliberately freezes during playback: the rAF loop writes the
+ * live frame into a ref and repaints the canvas, and never calls setState, which
+ * is what keeps 60Hz free of React. A readout built on the store therefore sits
+ * on the frame playback STARTED at until you pause. So it reads the ref instead
+ * and writes the number straight into the node.
+ */
 function PlayheadFrameLabel({ frameCount }: { frameCount: number | null }) {
   const currentFrame = usePlaybackSelector((s) => s.currentFrame)
+  const playing = usePlaybackSelector((s) => s.playing)
+  const frameRef = usePlaybackFrameRef()
+  const nodeRef = useRef<HTMLSpanElement | null>(null)
+
+  useEffect(() => {
+    if (!playing) return
+    let raf = 0
+    const tick = () => {
+      const node = nodeRef.current
+      if (node) {
+        const next = String(Math.round(Math.max(0, frameRef.current)))
+        // Compared before writing: an unchanged textContent still invalidates
+        // layout for the line, and the playhead crosses a whole frame only
+        // twice per sixty ticks at ordinary zoom.
+        if (node.textContent !== next) node.textContent = next
+      }
+      raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [playing, frameRef])
+
   return (
     <div className="shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground">
-      F {Math.round(currentFrame)}
+      F <span ref={nodeRef}>{Math.round(currentFrame)}</span>
       {frameCount != null ? ` / ${frameCount}` : ""}
     </div>
   )
@@ -935,7 +1004,7 @@ function InterpolationPanel({
   disabled,
   onChange,
 }: {
-  tabs: readonly { key: string; label: string }[]
+  tabs: readonly { key: string; label: string; color?: string | null; sep?: boolean }[]
   activeTab: string
   onTabChange: (key: string) => void
   p1: CurvePoint
@@ -943,29 +1012,54 @@ function InterpolationPanel({
   disabled: boolean
   onChange: (p1: CurvePoint, p2: CurvePoint) => void
 }) {
+  const t = useT()
   return (
     <>
       <div className="mb-2 mt-3 text-[10px] font-medium uppercase tracking-[0.06em] text-muted-foreground">
-        Interpolation
+        {t.inspector.interpolation}
       </div>
-      <div className="mb-1.5 flex flex-wrap gap-0.5">
-        {tabs.map((t) => (
-          <Button
-            key={t.key}
-            type="button"
-            variant={activeTab === t.key ? "secondary" : "ghost"}
-            size="xs"
-            disabled={disabled}
-            onClick={() => onTabChange(t.key)}
-            className="h-6 px-2 text-[9px] font-medium"
-          >
-            {t.label}
-          </Button>
-        ))}
+      <div className="mb-1.5 flex flex-wrap items-center gap-0.5">
+        {tabs.map((tabDef) => {
+          if (tabDef.sep) return <div key={tabDef.key} className="mx-0.5 h-3.5 w-px shrink-0 bg-line" />
+          const active = activeTab === tabDef.key
+          return (
+            <Button
+              key={tabDef.key}
+              type="button"
+              variant="ghost"
+              size="xs"
+              disabled={disabled}
+              onClick={() => onTabChange(tabDef.key)}
+              className={cn(
+                "h-5 shrink-0 rounded-md px-1 font-mono text-[9px] transition-none",
+                active
+                  ? tabDef.color
+                    ? "text-[#0f0f12] hover:opacity-90 dark:hover:bg-transparent"
+                    : "bg-foreground/90 text-background hover:bg-foreground hover:text-background dark:hover:bg-foreground"
+                  : "opacity-65 hover:bg-transparent hover:opacity-100 dark:hover:bg-transparent",
+                !active && !tabDef.color && "text-muted-foreground",
+              )}
+              style={
+                active && tabDef.color
+                  ? { backgroundColor: tabDef.color }
+                  : !active && tabDef.color
+                    ? { color: tabDef.color }
+                    : undefined
+              }
+            >
+              {ipTabLabel(t, tabDef.label)}
+            </Button>
+          )
+        })}
       </div>
-      <div className="flex items-stretch gap-1.5" style={{ height: 164 }}>
+      {/* The presets sit UNDER the curve rather than beside it. In a 14rem dock
+          a column of them would be about fifty pixels wide, which is narrower
+          than "Slow IO" — and the width they were taking is width the curve
+          editor can use, where it buys a bigger target for two handles that are
+          dragged by the pixel. */}
+      <div className="flex flex-col gap-1">
         <InterpolationCurveEditor p1={p1} p2={p2} disabled={disabled} onChange={onChange} />
-        <div className="flex min-w-0 flex-1 flex-col gap-1">
+        <div className="grid grid-cols-4 gap-1">
           {PRESETS.map((pr) => {
             const active = pr.p1.x === p1.x && pr.p1.y === p1.y && pr.p2.x === p2.x && pr.p2.y === p2.y
             return (
@@ -976,8 +1070,12 @@ function InterpolationPanel({
                 size="xs"
                 disabled={disabled}
                 onClick={() => onChange(pr.p1, pr.p2)}
+                // Four to a row leaves about forty-six pixels for "Slow Out",
+                // which is what it measures — so the title carries the name for
+                // the one that eventually does not fit.
+                title={pr.label}
                 className={cn(
-                  "h-auto min-h-0 flex-1 truncate px-1 py-0.5 text-center text-[9.5px] font-medium leading-tight",
+                  "h-5 min-h-0 w-full truncate px-1 text-center text-[9.5px] font-medium leading-tight",
                   active
                     ? "border-primary/30 text-primary"
                     : "text-muted-foreground hover:border-primary/25 hover:text-accent-foreground",
@@ -1040,14 +1138,14 @@ function sampleCameraAt(track: readonly CameraKeyframe[], frame: number): Camera
  *  — eight ungrouped rows showed "X Y Z" twice with nothing saying which was
  *  which. */
 const CAMERA_GROUPS = [
-  { group: "rot" as const, label: "Rotation", stripPrefix: true },
-  { group: "tgt" as const, label: "Target", stripPrefix: true },
+  { group: "rot" as const, labelKey: "rotation" as const, stripPrefix: true },
+  { group: "tgt" as const, labelKey: "target" as const, stripPrefix: true },
   // Distance and FOV get no heading of their own: a one-row section whose title
   // repeats the row's own label is a header saying nothing. They are separated
   // from Target by space instead — enough to read as a break, without pretending
   // to be two more groups.
-  { group: "dist" as const, label: null, stripPrefix: false },
-  { group: "fov" as const, label: null, stripPrefix: false },
+  { group: "dist" as const, labelKey: null, stripPrefix: false },
+  { group: "fov" as const, labelKey: null, stripPrefix: false },
 ]
 
 /** The axis tab that shows exactly one channel — where a slider drag points
@@ -1101,6 +1199,7 @@ const CameraSection = memo(function CameraSection({
   canCopy: boolean
   canPaste: boolean
 }) {
+  const t = useT()
   const opRow =
     "h-6 flex-1 rounded-chip border border-line-strong bg-surface-raised px-0.5 text-[10px] text-muted-foreground hover:text-foreground"
   const destructiveOpRow = cn(opRow, "text-red-400 hover:bg-red-400/10 hover:text-red-400")
@@ -1217,13 +1316,13 @@ const CameraSection = memo(function CameraSection({
       <section className="border-b border-line pb-3">
         <div className="mb-2 flex items-start justify-between gap-2">
           <div>
-            <div className="text-xs font-semibold text-inherit">Camera</div>
+            <div className="text-xs font-semibold text-inherit">{t.camera.title}</div>
             <div className="text-[10px] text-muted-foreground">
               {cameraTrack.length === 0
-                ? "No keys — move a slider to key one"
+                ? t.camera.noKeys
                 : keyAtPlayhead
-                  ? `${cameraTrack.length} keys · editing key @ ${frame}`
-                  : `${cameraTrack.length} keys · none @ ${frame}`}
+                  ? t.camera.editingAt(cameraTrack.length, frame)
+                  : t.camera.noneAt(cameraTrack.length, frame)}
             </div>
           </div>
         </div>
@@ -1238,9 +1337,9 @@ const CameraSection = memo(function CameraSection({
               group.group === "dist" && "mt-4",
             )}
           >
-            {group.label ? (
+            {group.labelKey ? (
               <div className="mb-1 text-[10px] font-medium uppercase tracking-[0.06em] text-muted-foreground">
-                {group.label}
+                {t.camera[group.labelKey]}
               </div>
             ) : null}
             {CAMERA_CHANNELS.filter((c) => c.group === group.group).map((ch) => {
@@ -1267,7 +1366,7 @@ const CameraSection = memo(function CameraSection({
       </section>
 
       <InterpolationPanel
-        tabs={CAMERA_IP_TABS.map((t) => ({ key: String(t.ip), label: t.label }))}
+        tabs={CAMERA_IP_TABS.map((t) => ({ key: String(t.ip), label: t.label, color: t.color, sep: t.sep }))}
         activeTab={String(ipChannel)}
         onTabChange={(k) => setIpChannel(Number(k))}
         p1={ipPair[0]}
@@ -1277,10 +1376,10 @@ const CameraSection = memo(function CameraSection({
       />
 
       <section className="space-y-2 pt-2.5">
-        <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Operations</div>
+        <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">{t.inspector.operations}</div>
         <div className="space-y-2.5">
           <div className="flex items-center gap-1.5">
-            <span className="w-10 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">Key</span>
+            <span className="w-10 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">{t.inspector.groupKey}</span>
             <Button
               type="button"
               variant="ghost"
@@ -1288,9 +1387,9 @@ const CameraSection = memo(function CameraSection({
               className={opRow}
               disabled={!!keyAtPlayhead}
               onClick={insertKey}
-              title="Key the camera's current pose at the playhead"
+              title={t.camera.insertTitle}
             >
-              Insert
+              {t.inspector.insert}
             </Button>
             <Button
               type="button"
@@ -1299,25 +1398,25 @@ const CameraSection = memo(function CameraSection({
               className={destructiveOpRow}
               disabled={!keyAtPlayhead}
               onClick={deleteKey}
-              title="Remove the camera keyframe at the playhead"
+              title={t.camera.deleteTitle}
             >
-              Delete
+              {t.inspector.delete}
             </Button>
           </div>
           <div className="flex items-center gap-1.5">
-            <span className="w-10 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">Sel</span>
+            <span className="w-10 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">{t.inspector.groupSel}</span>
             <Button type="button" variant="ghost" size="xs" className={opRow} disabled={!canCopy} onClick={onCopySelectedKeyframes}>
-              Copy
+              {t.inspector.copy}
             </Button>
             <Button type="button" variant="ghost" size="xs" className={destructiveOpRow} disabled={!canCopy} onClick={onCutSelectedKeyframes}>
-              Cut
+              {t.inspector.cut}
             </Button>
             <Button type="button" variant="ghost" size="xs" className={opRow} disabled={!canPaste} onClick={onPasteAtPlayhead}>
-              Paste
+              {t.inspector.paste}
             </Button>
           </div>
           <div className="flex items-center gap-1.5">
-            <span className="w-10 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">Track</span>
+            <span className="w-10 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">{t.inspector.groupTrack}</span>
             {/* Permanently disabled, and kept anyway: Simplify fits a curve
                 through dense keys, and a camera VMD is sparse by nature — its
                 keys ARE the cuts, so there is nothing to reduce. Dropping the
@@ -1329,9 +1428,9 @@ const CameraSection = memo(function CameraSection({
               size="xs"
               className={opRow}
               disabled
-              title="Simplify applies to dense bone tracks — a camera's keys are its cuts"
+              title={t.camera.simplifyDisabled}
             >
-              Simplify
+              {t.inspector.simplify}
             </Button>
             <Button
               type="button"
@@ -1340,9 +1439,9 @@ const CameraSection = memo(function CameraSection({
               className={destructiveOpRow}
               disabled={cameraTrack.length === 0}
               onClick={onClearCameraTrack}
-              title="Remove every camera keyframe"
+              title={t.camera.clearTitle}
             >
-              Clear
+              {t.inspector.clear}
             </Button>
           </div>
         </div>

@@ -3,6 +3,7 @@
 import { useRef, useState, useEffect, useCallback, useMemo, memo } from "react"
 import { ChevronRight } from "lucide-react"
 import { BONE_GROUPS } from "@/lib/animation"
+import { useT } from "@/lib/i18n"
 import { cn } from "@/lib/utils"
 import type { AnimationClip } from "reze-engine"
 
@@ -31,11 +32,13 @@ type Row =
 
 const GroupRow = memo(function GroupRow({
   name,
+  label,
   boneCount,
   isSelected,
   onClick,
 }: {
   name: string
+  label: string
   boneCount: number
   isSelected: boolean
   onClick: () => void
@@ -61,7 +64,7 @@ const GroupRow = memo(function GroupRow({
         />
       </span>
       <span className="min-w-0 flex-1 truncate py-[1px] ">
-        {name}{" "}
+        {label}{" "}
         <span className="tabular-nums">
           ({boneCount})
         </span>
@@ -114,6 +117,7 @@ export const BoneList = memo(function BoneList({
   onSelectBone,
   revealRequest,
 }: BoneListProps) {
+  const t = useT()
   const containerRef = useRef<HTMLDivElement>(null)
   const [scrollTop, setScrollTop] = useState(0)
   const [viewH, setViewH] = useState(0)
@@ -205,9 +209,6 @@ export const BoneList = memo(function BoneList({
 
   return (
     <div ref={containerRef} className="h-full touch-pan-y overscroll-contain overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden" onScroll={onScroll}>
-      <div className="px-3 py-1 text-[11px] font-medium uppercase leading-tight tracking-widest text-muted-foreground">
-        Motion
-      </div>
       <div style={{ position: "relative", height: total }}>
         {rows.slice(startIdx, endIdx).map((row, i) => {
           const idx = startIdx + i
@@ -221,6 +222,9 @@ export const BoneList = memo(function BoneList({
               {row.type === "group" ? (
                 <GroupRow
                   name={row.name}
+                  // The group key stays English — it is the taxonomy's id, and
+                  // a restored draft names it — so only the label translates.
+                  label={t.boneGroups[row.name] ?? row.name}
                   boneCount={row.boneCount}
                   isSelected={row.isSelected}
                   onClick={() => onSelectGroup(row.name)}

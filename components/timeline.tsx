@@ -20,7 +20,8 @@ import {
   ZoomOut,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { cn } from "@/lib/utils"
+import { cn, monoFont } from "@/lib/utils"
+import { useT, type Dictionary } from "@/lib/i18n"
 import { useStudioActions, useStudioSelector, type SelectedKeyframe } from "@/context/studio-context"
 import { usePlayback } from "@/context/playback-context"
 import type { AnimationClip, BoneKeyframe, CameraKeyframe, MorphKeyframe } from "reze-engine"
@@ -115,7 +116,10 @@ const C = {
   sidebarHover: "#1e1e28",
 } as const
 
-const FONT = "'SF Mono','Cascadia Code','Fira Code','JetBrains Mono',monospace"
+/** Resolved from --font-mono, so the canvas letters match the chrome's — see
+ *  monoFont(). A call, not a constant: the variable is only readable once the
+ *  document exists, and this module is evaluated during import. */
+const FONT = () => monoFont()
 
 function padFrame4(n: number) {
   return String(Math.max(0, Math.round(n))).padStart(4, "0")
@@ -191,23 +195,45 @@ function getAxisConfig(tab: string) {
   }
 }
 
+/** The group names in the tab strips. X / Y / Z are left alone — they are the
+ *  same three letters in every language this ships with, and translating an
+ *  axis would make the chip disagree with the curve colour beside it. */
+function tabLabel(t: Dictionary, label: string): string {
+  switch (label) {
+    case "Rotation":
+      return t.timeline.rotation
+    case "Translation":
+      return t.timeline.translation
+    case "Target":
+      return t.timeline.target
+    case "Weight":
+      return t.timeline.weight
+    case "Distance":
+      return t.timeline.distance
+    case "FOV":
+      return t.timeline.fov
+    default:
+      return label
+  }
+}
+
 const MORPH_COLOR = "#c084fc"
 
 type TabDef = { key: string; label: string; color: string | null; sep: boolean }
 
 const BONE_TABS: TabDef[] = [
-  { key: "allRot", label: "All Rot", color: null, sep: false },
+  { key: "allRot", label: "Rotation", color: null, sep: false },
   { key: "rx", label: "X", color: C.rotX, sep: false },
   { key: "ry", label: "Y", color: C.rotY, sep: false },
   { key: "rz", label: "Z", color: C.rotZ, sep: false },
   { key: "_sep1", label: "", color: null, sep: true },
-  { key: "allTra", label: "All Trans", color: null, sep: false },
+  { key: "allTra", label: "Translation", color: null, sep: false },
   { key: "tx", label: "X", color: C.traX, sep: false },
   { key: "ty", label: "Y", color: C.traY, sep: false },
   { key: "tz", label: "Z", color: C.traZ, sep: false },
 ]
 
-// Colour-less, like "All Rot" and "All Trans": those three are the only tab in
+// Colour-less, like "Rotation" and "Translation": those three are the only tab in
 // their set, so a coloured chip would be keying a hue to nothing — there is no
 // sibling channel to tell it apart from. The curve itself still draws in
 // MORPH_COLOR; this is only the chip.
@@ -243,10 +269,18 @@ function TransportFrameSlider({
   frameCount,
   value,
   onChange,
+  thumbRef,
+  label,
 }: {
   frameCount: number
   value: number
   onChange: (f: number) => void
+  label: string
+  /** Handed to the playback loop, which writes `left` straight onto the thumb.
+   *  React state stops updating during playback by design — the transport is
+   *  driven imperatively — so without this the thumb sits still for the whole
+   *  clip while the playhead runs. */
+  thumbRef?: RefObject<HTMLDivElement | null>
 }) {
   const trackRef = useRef<HTMLDivElement>(null)
   const dragging = useRef(false)
@@ -288,7 +322,7 @@ function TransportFrameSlider({
       <div
         ref={trackRef}
         role="slider"
-        aria-label="Scrub playhead"
+        aria-label={label}
         aria-valuemin={0}
         aria-valuemax={frameCount}
         aria-valuenow={Math.round(value)}
@@ -314,6 +348,7 @@ function TransportFrameSlider({
       >
         <div className="absolute left-0 right-0 top-1/2 h-0.5 -translate-y-1/2 rounded-[1px] bg-border" />
         <div
+          ref={thumbRef}
           className="pointer-events-none absolute top-1/2 size-[9px] -translate-x-1/2 -translate-y-1/2 rounded-full border-[1.5px] border-muted-foreground bg-secondary box-border"
           style={{ left: `${pct}%` }}
         />
@@ -329,11 +364,13 @@ function ZoomRuler({
   max,
   value,
   onChange,
+  labels,
 }: {
   min: number
   max: number
   value: number
   onChange: (v: number) => void
+  labels: { zoom: string; zoomIn: string; zoomOut: string }
 }) {
   const trackRef = useRef<HTMLDivElement>(null)
   const dragging = useRef(false)
@@ -387,7 +424,7 @@ function ZoomRuler({
         type="button"
         variant="ghost"
         size="icon-xs"
-        aria-label="Zoom out"
+        aria-label={labels.zoomOut}
         className={cn(
           "size-5 shrink-0 overflow-hidden p-0 text-muted-foreground",
           "hover:bg-transparent dark:hover:bg-transparent active:bg-muted/50",
@@ -401,7 +438,7 @@ function ZoomRuler({
       <div
         ref={trackRef}
         role="slider"
-        aria-label="Timeline zoom"
+        aria-label={labels.zoom}
         aria-valuemin={min}
         aria-valuemax={max}
         aria-valuenow={value}
@@ -428,7 +465,7 @@ function ZoomRuler({
         type="button"
         variant="ghost"
         size="icon-xs"
-        aria-label="Zoom in"
+        aria-label={labels.zoomIn}
         className={cn(
           "size-5 shrink-0 overflow-hidden p-0 text-muted-foreground",
           "hover:bg-transparent dark:hover:bg-transparent active:bg-muted/50",
@@ -487,6 +524,9 @@ type StickyBox =
   | { kind: "curve"; minF: number; maxF: number; minV: number; maxV: number }
 
 interface TimelineCanvasProps {
+  /** The handful of words the canvas paints. Passed rather than hooked so the
+   *  draw path reads one stable object instead of a context on every repaint. */
+  labels: Dictionary["timeline"]
   clip: AnimationClip
   pxPerFrame: number
   yZoom: number
@@ -555,6 +595,7 @@ interface TimelineCanvasProps {
 }
 
 function TimelineCanvas({
+  labels,
   clip,
   pxPerFrame,
   yZoom,
@@ -625,6 +666,7 @@ function TimelineCanvas({
     audioPeaks: readonly number[] | null
     visibleBones: readonly string[] | null
     selectedKeyframes: readonly SelectedKeyframe[] | null
+    labels: Dictionary["timeline"] | null
     tab: string
     dragVersion: number
   }>({
@@ -641,6 +683,7 @@ function TimelineCanvas({
     audioPeaks: null,
     visibleBones: null,
     selectedKeyframes: null,
+    labels: null,
     tab: "",
     dragVersion: 0,
   })
@@ -753,6 +796,7 @@ function TimelineCanvas({
       cache.audioPeaks !== audioPeaks ||
       cache.visibleBones !== visibleBones ||
       cache.selectedKeyframes !== selectedKeyframes ||
+      cache.labels !== labels ||
       cache.tab !== tab ||
       cache.dragVersion !== dragVersionRef.current
 
@@ -808,7 +852,7 @@ function TimelineCanvas({
     const fStep = pxPerFrame >= 12 ? 1 : pxPerFrame >= 6 ? 5 : 10
     const fMajor = fStep * 10
     const rulerFontPx = 9
-    ctx.font = `${rulerFontPx}px ${FONT}`
+    ctx.font = `${rulerFontPx}px ${FONT()}`
     ctx.textAlign = "center"
     ctx.textBaseline = "bottom"
     const rulerTickTop = (maj: boolean) => (maj ? 2 : RULER_H - 4)
@@ -834,7 +878,7 @@ function TimelineCanvas({
     ctx.fillStyle = C.ruler
     ctx.fillRect(0, curveTop, LABEL_W, curveBot - curveTop)
 
-    ctx.font = `9px ${FONT}`
+    ctx.font = `9px ${FONT()}`
     const isRotAxis = channels[0]?.group === "rot"
     // Snap tick iteration to multiples of subStep within the current view range,
     // further clamped to tickMin/tickMax — morph's plotted range pads past
@@ -967,10 +1011,10 @@ function TimelineCanvas({
         }
       } else {
         ctx.fillStyle = C.label
-        ctx.font = `13px ${FONT}`
+        ctx.font = `13px ${FONT()}`
         ctx.textAlign = "center"
         ctx.textBaseline = "middle"
-        ctx.fillText("No keyframes \u2014 Camera", (w + LABEL_W) / 2, (curveTop + curveBot) / 2)
+        ctx.fillText(labels.noKeyframes(labels.camera), (w + LABEL_W) / 2, (curveTop + curveBot) / 2)
       }
     } else if (isMorphTab) {
       // ── Morph weight curve ──
@@ -1010,17 +1054,17 @@ function TimelineCanvas({
           // (value readout is drawn in the per-tick overlay below)
         } else {
           ctx.fillStyle = C.label
-          ctx.font = `13px ${FONT}`
+          ctx.font = `13px ${FONT()}`
           ctx.textAlign = "center"
           ctx.textBaseline = "middle"
-          ctx.fillText("No keyframes — " + selectedMorph, (w + LABEL_W) / 2, (curveTop + curveBot) / 2)
+          ctx.fillText(labels.noKeyframes(selectedMorph), (w + LABEL_W) / 2, (curveTop + curveBot) / 2)
         }
       } else {
         ctx.fillStyle = C.label
-        ctx.font = `13px ${FONT}`
+        ctx.font = `13px ${FONT()}`
         ctx.textAlign = "center"
         ctx.textBaseline = "middle"
-        ctx.fillText("Select a morph to view curve", (w + LABEL_W) / 2, (curveTop + curveBot) / 2)
+        ctx.fillText(labels.selectMorph, (w + LABEL_W) / 2, (curveTop + curveBot) / 2)
       }
     } else if (selectedBone) {
       const keyframes = clip.boneTracks.get(selectedBone)
@@ -1165,17 +1209,17 @@ function TimelineCanvas({
         // (value readout is drawn in the per-tick overlay below)
       } else {
         ctx.fillStyle = C.label
-        ctx.font = `13px ${FONT}`
+        ctx.font = `13px ${FONT()}`
         ctx.textAlign = "center"
         ctx.textBaseline = "middle"
-        ctx.fillText("No keyframes — " + boneDisplayLabel(selectedBone), (w + LABEL_W) / 2, (curveTop + curveBot) / 2)
+        ctx.fillText(labels.noKeyframes(boneDisplayLabel(selectedBone)), (w + LABEL_W) / 2, (curveTop + curveBot) / 2)
       }
     } else {
       ctx.fillStyle = C.label
-      ctx.font = `13px ${FONT}`
+      ctx.font = `13px ${FONT()}`
       ctx.textAlign = "center"
       ctx.textBaseline = "middle"
-      ctx.fillText("Select a bone to view curves", (w + LABEL_W) / 2, (curveTop + curveBot) / 2)
+      ctx.fillText(labels.selectBone, (w + LABEL_W) / 2, (curveTop + curveBot) / 2)
     }
 
     // Persistent selection box — the RECTANGLE the user actually dragged to
@@ -1210,7 +1254,7 @@ function TimelineCanvas({
       ctx.stroke()
     }
 
-    ctx.font = `10px ${FONT}`
+    ctx.font = `10px ${FONT()}`
     ctx.textAlign = "center"
     const sortedDope = Array.from(frames.entries()).sort((a, b) => a[0] - b[0])
     for (const [frame, count] of sortedDope) {
@@ -1292,10 +1336,10 @@ function TimelineCanvas({
       // names in one gutter, and anything that differs between them reads as a
       // difference in kind rather than in styling.
       ctx.fillStyle = C.dopeLabel
-      ctx.font = `10px ${FONT}`
+      ctx.font = `10px ${FONT()}`
       ctx.textAlign = "right"
       ctx.textBaseline = "middle"
-      ctx.fillText("Music", LABEL_W - 6, mid + 1)
+      ctx.fillText(labels.music, LABEL_W - 6, mid + 1)
     }
 
     // Dopesheet label
@@ -1307,10 +1351,10 @@ function TimelineCanvas({
     ctx.lineTo(LABEL_W - 0.5, h)
     ctx.stroke()
     ctx.fillStyle = C.dopeLabel
-    ctx.font = `10px ${FONT}`
+    ctx.font = `10px ${FONT()}`
     ctx.textAlign = "right"
     ctx.textBaseline = "middle"
-    ctx.fillText("Keys", LABEL_W - 6, dopeMid + 2)
+    ctx.fillText(labels.keys, LABEL_W - 6, dopeMid + 2)
 
       cache.w = backingW
       cache.h = backingH
@@ -1325,6 +1369,7 @@ function TimelineCanvas({
       cache.audioPeaks = audioPeaks
       cache.visibleBones = visibleBones
       cache.selectedKeyframes = selectedKeyframes
+        cache.labels = labels
       cache.tab = tab
       cache.dragVersion = dragVersionRef.current
     }
@@ -1343,7 +1388,7 @@ function TimelineCanvas({
       if (tab === "morph" && selectedMorph) {
         const morphKfs = clip.morphTracks.get(selectedMorph)
         if (morphKfs && morphKfs.length > 0) {
-          ctx.font = `10px ${FONT}`
+          ctx.font = `10px ${FONT()}`
           ctx.textBaseline = "top"
           ctx.textAlign = "right"
           // Sampled, for the same reason the bone readout below is: the curve
@@ -1356,7 +1401,7 @@ function TimelineCanvas({
       } else if (selectedBone) {
         const keyframes = clip.boneTracks.get(selectedBone)
         if (keyframes && keyframes.length > 0) {
-          ctx.font = `10px ${FONT}`
+          ctx.font = `10px ${FONT()}`
           ctx.textBaseline = "top"
           ctx.textAlign = "right"
           // `?.` like the axis label above: the morph tab has no channels, so
@@ -1419,7 +1464,7 @@ function TimelineCanvas({
         }
       }
     }
-  }, [clip, pxPerFrame, yZoom, scrollX, selectedBone, selectedMorph, cameraTrack, frameCount, audioPeaks, audioDuration, visibleBones, selectedKeyframes, tab, getDopeFrames])
+  }, [labels, clip, pxPerFrame, yZoom, scrollX, selectedBone, selectedMorph, cameraTrack, frameCount, audioPeaks, audioDuration, visibleBones, selectedKeyframes, tab, getDopeFrames])
   drawRef2.current = draw
 
   // Layout-phase paint: `useEffect`+nested rAF ran after browser paint → playhead lagged 1–2 frames behind transport.
@@ -2297,6 +2342,7 @@ export function Timeline({
   const cameraTrack = useStudioSelector((s) => s.cameraTrack)
   const cameraSelected = useStudioSelector((s) => s.cameraSelected)
   const { commit, commitCamera, setSelectedKeyframes } = useStudioActions()
+  const t = useT()
   const selectionKind: "bone" | "morph" | "camera" = cameraSelected
     ? "camera"
     : selectedMorph
@@ -2433,6 +2479,9 @@ export function Timeline({
   // the timeline if the playhead leaves the visible window. `setScrollX` fires
   // only on the page-turn frame (a few times per clip), not per-frame.
   const innerDrawRef = useRef<((frame: number) => void) | null>(null)
+  /** The two readouts the playback loop writes to directly. */
+  const frameFieldRef = useRef<HTMLInputElement | null>(null)
+  const thumbElRef = useRef<HTMLDivElement | null>(null)
   const fcRef = useRef(fc)
   fcRef.current = fc
   const trackWidthRef = useRef(trackWidth)
@@ -2452,6 +2501,18 @@ export function Timeline({
           const target = Math.max(0, Math.min(maxScroll, playheadX - viewable * 0.1))
           setScrollX(target)
         }
+      }
+      // The frame number and the scrub thumb, moved without React. Both are
+      // reading transport state that deliberately stops updating during
+      // playback, so they are written here or they do not move at all.
+      const field = frameFieldRef.current
+      // Never while it is focused: that is someone typing a frame to jump to,
+      // and rewriting the value under the caret makes the field unusable.
+      if (field && document.activeElement !== field) field.value = padFrame4(frame)
+      const thumb = thumbElRef.current
+      if (thumb) {
+        const total = fcRef.current
+        thumb.style.left = `${total > 0 ? Math.max(0, Math.min(100, (frame / total) * 100)) : 0}%`
       }
       innerDrawRef.current?.(frame)
     }
@@ -2757,7 +2818,7 @@ export function Timeline({
   }, [commit, commitCamera, tab, setSelectedKeyframes])
 
   return (
-    <div className="flex h-full w-full select-none flex-col" style={{ fontFamily: FONT }}>
+    <div className="flex h-full w-full select-none flex-col" style={{ fontFamily: FONT() }}>
       {/* Toolbar — compact controls + channel tabs; axis hues stay exact via inline `t.color` when set */}
       <div className="flex h-[26px] shrink-0 flex-nowrap items-center gap-0.5 overflow-hidden border-b border-line bg-background px-1.5">
         {/* Fixed square + Lucide icons — avoids uneven unicode box and mixed h-5 / h-[22px] misalignment */}
@@ -2841,6 +2902,8 @@ export function Timeline({
         <TransportFrameSlider
           frameCount={fc}
           value={currentFrame}
+          thumbRef={thumbElRef}
+          label={t.timeline.scrub}
           onChange={(f) => {
             setPlaying(false)
             setCurrentFrame(f)
@@ -2851,7 +2914,8 @@ export function Timeline({
           <input
             type="text"
             inputMode="numeric"
-            aria-label="Current frame"
+            ref={frameFieldRef}
+            aria-label={t.timeline.currentFrame}
             disabled={!clip}
             value={frameDraft ?? padFrame4(currentFrame)}
             onFocus={() => setFrameDraft(padFrame4(currentFrame))}
@@ -2877,7 +2941,7 @@ export function Timeline({
           <input
             type="text"
             inputMode="numeric"
-            aria-label="Clip end frame"
+            aria-label={t.timeline.endFrame}
             disabled={!clip}
             value={endDraft ?? padFrame4(fc)}
             onFocus={() => setEndDraft(padFrame4(fc))}
@@ -2901,17 +2965,17 @@ export function Timeline({
         </div>
         <div className="mx-0.5 h-3.5 w-px shrink-0 bg-line" />
         {/* Channel tabs */}
-        {visibleTabs.map((t) => {
-          if (t.sep)
-            return <div key={t.key} className="mx-px h-3.5 w-px shrink-0 bg-line" />
-          const active = tab === t.key
+        {visibleTabs.map((tabDef) => {
+          if (tabDef.sep)
+            return <div key={tabDef.key} className="mx-px h-3.5 w-px shrink-0 bg-line" />
+          const active = tab === tabDef.key
           return (
             <Button
               type="button"
-              key={t.key}
+              key={tabDef.key}
               variant="ghost"
               size="sm"
-              onClick={() => setTab(t.key)}
+              onClick={() => setTab(tabDef.key)}
               className={cn(
                 "h-5 max-h-5 min-h-5 shrink-0 overflow-hidden rounded-md px-1.5 font-mono text-[10px]",
                 "focus-visible:outline-none focus-visible:ring-0",
@@ -2930,7 +2994,7 @@ export function Timeline({
                 // hover: it is already where you are. So its hover state is
                 // pinned to its active state, dark: variant included.
                 active
-                  ? t.color
+                  ? tabDef.color
                     ? "text-[#0f0f12] hover:text-[#0f0f12] hover:opacity-90 dark:hover:bg-transparent"
                     // The aggregate tabs (All Rot / All Trans / All Tgt) and
                     // Weight carry no hue of their own, so they cannot use the
@@ -2941,30 +3005,31 @@ export function Timeline({
                     // belongs to a channel.
                     : "bg-foreground/90 text-background hover:bg-foreground hover:text-background dark:hover:bg-foreground"
                   : "opacity-65 hover:opacity-100 hover:bg-transparent dark:hover:bg-transparent active:bg-muted/50",
-                !active && !t.color && "text-muted-foreground",
+                !active && !tabDef.color && "text-muted-foreground",
               )}
               style={
-                active && t.color
-                  ? { backgroundColor: t.color }
-                  : !active && t.color
-                    ? { color: t.color }
+                active && tabDef.color
+                  ? { backgroundColor: tabDef.color }
+                  : !active && tabDef.color
+                    ? { color: tabDef.color }
                     : undefined
               }
             >
-              {t.label}
+              {tabLabel(t, tabDef.label)}
             </Button>
           )
         })}
         <div className="min-w-0 flex-1" />
-        <span className="shrink-0 px-1 text-[10px] uppercase tracking-wide text-muted-foreground">Time</span>
-        <ZoomRuler min={minPxPerFrame} max={MAX_PX} value={pxPerFrame} onChange={zoomTo} />
-        <span className="shrink-0 px-1 pl-2 text-[10px] uppercase tracking-wide text-muted-foreground">Value</span>
-        <ZoomRuler min={Y_ZOOM_MIN} max={Y_ZOOM_MAX} value={yZoom} onChange={setYZoom} />
+        <span className="shrink-0 px-1 text-[10px] uppercase tracking-wide text-muted-foreground">{t.timeline.time}</span>
+        <ZoomRuler min={minPxPerFrame} max={MAX_PX} value={pxPerFrame} onChange={zoomTo} labels={t.timeline} />
+        <span className="shrink-0 px-1 pl-2 text-[10px] uppercase tracking-wide text-muted-foreground">{t.timeline.value}</span>
+        <ZoomRuler min={Y_ZOOM_MIN} max={Y_ZOOM_MAX} value={yZoom} onChange={setYZoom} labels={t.timeline} />
       </div>
       {/* Canvas */}
       <div ref={timelineAreaRef} style={{ flex: 1, minHeight: 0 }}>
         {clip ? (
           <TimelineCanvas
+            labels={t.timeline}
             clip={clip}
             pxPerFrame={pxPerFrame}
             yZoom={yZoom}
@@ -3013,7 +3078,7 @@ export function Timeline({
               background: C.curveBg,
             }}
           >
-            Load VMD for timeline…
+            {t.timeline.empty}
           </div>
         )}
       </div>

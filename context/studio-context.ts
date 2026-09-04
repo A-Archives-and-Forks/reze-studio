@@ -16,6 +16,7 @@ import {
 } from "react"
 import type { AnimationClip, CameraKeyframe } from "reze-engine"
 import { clipAfterKeyframeEdit, cloneAnimationClip } from "@/lib/utils"
+import { newId, type ClipId, type LibraryClip } from "@/lib/project"
 
 const HISTORY_LIMIT = 100
 
@@ -33,6 +34,19 @@ export interface SelectedKeyframe {
 }
 
 export type StudioState = {
+  /**
+   * Every clip the project holds, in import order.
+   *
+   * The first half of `Project` from lib/project.ts — the arrangement's other
+   * half, tracks and placements, becomes visible with the Arrange view. Until
+   * then exactly one library entry is being edited at a time and `clip` below
+   * is that entry's own clip object, not a copy of it: the drag paths mutate
+   * keyframes in place, and two objects that have to be kept in step are two
+   * objects that will eventually not be.
+   */
+  library: LibraryClip[]
+  /** Which library entry `clip` belongs to. Null only before the first load. */
+  activeClipId: ClipId | null
   clip: AnimationClip | null
   clipDisplayName: string
   selectedBone: string | null
@@ -98,6 +112,20 @@ export type StudioKeyframesSetter = Dispatch<SetStateAction<SelectedKeyframe[]>>
 
 export type StudioActions = {
   commit: StudioClipCommit
+  /** Add a clip to the library WITHOUT making it the one being edited — what
+   *  Import VMD does. Returns the id so the caller can reveal the new row. */
+  importClip: (name: string, clip: AnimationClip) => ClipId
+  /** Edit a different library clip. Selections that name something the new clip
+   *  does not have are dropped by the caller, not here. */
+  activateClip: (id: ClipId) => void
+  /** Replace the whole library with this one clip — what Open VMD and New do.
+   *  Keeps the model, the camera and the music, like the old single-clip Load. */
+  openClip: (name: string, clip: AnimationClip) => void
+  /** Put a whole library back, from a saved draft. No history — a restore is
+   *  where the document starts, not something to undo past. */
+  restoreLibrary: (library: LibraryClip[], activeClipId: ClipId | null) => void
+  removeLibraryClip: (id: ClipId) => void
+  renameLibraryClip: (id: ClipId, name: string) => void
   /** Load a clip without recording history — for VMD imports, PMX swaps,
    *  document reset. Clears past/future. Editing actions go through `commit`. */
   replaceClip: (next: AnimationClip | null) => void
@@ -119,6 +147,8 @@ export type StudioActions = {
 }
 
 const INITIAL_STATE: StudioState = {
+  library: [],
+  activeClipId: null,
   clip: null,
   clipDisplayName: "clip",
   selectedBone: null,
@@ -141,6 +171,26 @@ const INITIAL_STATE: StudioState = {
  *  the channel setters rather than mutated, so sharing them is safe. */
 function cloneCameraTrack(track: CameraKeyframe[]): CameraKeyframe[] {
   return track.map((kf) => ({ ...kf }))
+}
+
+/**
+ * The library, with the active entry's clip pointed at `clip`.
+ *
+ * Called from every path that changes `clip` — commit, replace, undo, redo — so
+ * the two can never describe different keyframes. Doing it here rather than at
+ * the call sites is the point: an edit path that forgets would leave the
+ * library holding a clip the editor has already moved past, and nothing on
+ * screen would say so until the next export.
+ */
+function libraryWithActiveClip(state: StudioState, clip: AnimationClip | null): LibraryClip[] {
+  if (clip == null || state.activeClipId == null) return state.library
+  let touched = false
+  const next = state.library.map((entry) => {
+    if (entry.id !== state.activeClipId || entry.clip === clip) return entry
+    touched = true
+    return { ...entry, clip }
+  })
+  return touched ? next : state.library
 }
 
 /** Resolve a `SetStateAction<T>` against the current value. */
@@ -205,6 +255,7 @@ function createStudioStore(): StudioStore {
       set({
         ...state,
         clip: finalNext,
+        library: libraryWithActiveClip(state, finalNext),
         clipSnapshot: cloneAnimationClip(finalNext),
         past: pushPast(state.past, snapshotOf(state)),
         future: [],
@@ -228,11 +279,102 @@ function createStudioStore(): StudioStore {
       set({
         ...state,
         clip: finalNext,
+        library: libraryWithActiveClip(state, finalNext),
         clipSnapshot: cloneAnimationClip(finalNext),
         past: [],
         future: [],
       })
     },
+
+    importClip: (name, clip) => {
+      const entry: LibraryClip = { id: newId(), name, clip: clipAfterKeyframeEdit(clip) }
+      set({ ...state, library: [...state.library, entry] })
+      return entry.id
+    },
+
+    activateClip: (id) => {
+      const entry = state.library.find((c) => c.id === id)
+      if (!entry || id === state.activeClipId) return
+      // The working clip becomes the entry's own object, so the drag paths keep
+      // mutating in place exactly as they did with one clip.
+      set({
+        ...state,
+        activeClipId: id,
+        clip: entry.clip,
+        clipDisplayName: entry.name,
+        clipSnapshot: cloneAnimationClip(entry.clip),
+        // The other clip's keys are not this clip's keys, and a stale
+        // selection would delete or drag something the user cannot see.
+        selectedKeyframes: [],
+        past: [],
+        future: [],
+      })
+    },
+
+    openClip: (name, clip) => {
+      const finalNext = clipAfterKeyframeEdit(clip)
+      const entry: LibraryClip = { id: newId(), name, clip: finalNext }
+      set({
+        ...state,
+        library: [entry],
+        activeClipId: entry.id,
+        clip: finalNext,
+        clipDisplayName: name,
+        clipSnapshot: cloneAnimationClip(finalNext),
+        selectedKeyframes: [],
+        past: [],
+        future: [],
+      })
+    },
+
+    restoreLibrary: (library, activeClipId) => {
+      const active = library.find((c) => c.id === activeClipId) ?? library[0] ?? null
+      set({
+        ...state,
+        library,
+        activeClipId: active?.id ?? null,
+        clip: active?.clip ?? null,
+        clipDisplayName: active?.name ?? "clip",
+        clipSnapshot: active ? cloneAnimationClip(active.clip) : null,
+        selectedKeyframes: [],
+        past: [],
+        future: [],
+      })
+    },
+
+    removeLibraryClip: (id) => {
+      const library = state.library.filter((c) => c.id !== id)
+      if (library.length === state.library.length) return
+      if (id !== state.activeClipId) {
+        set({ ...state, library })
+        return
+      }
+      // Removing what is being edited moves the edit to whatever is left, and
+      // to an empty document when nothing is.
+      const next = library[0] ?? null
+      set({
+        ...state,
+        library,
+        activeClipId: next?.id ?? null,
+        clip: next?.clip ?? null,
+        clipDisplayName: next?.name ?? "clip",
+        clipSnapshot: next ? cloneAnimationClip(next.clip) : null,
+        selectedBone: null,
+        selectedMorph: null,
+        selectedKeyframes: [],
+        past: [],
+        future: [],
+      })
+    },
+
+    renameLibraryClip: (id, name) => {
+      set({
+        ...state,
+        library: state.library.map((c) => (c.id === id ? { ...c, name } : c)),
+        clipDisplayName: id === state.activeClipId ? name : state.clipDisplayName,
+      })
+    },
+
     setClipDisplayName: (name) => update("clipDisplayName", name),
     // Selecting a bone does NOT summon the gizmo — see `gizmoVisible`. The
     // viewport dblclick path asks for it explicitly, because there the pick and
@@ -282,9 +424,11 @@ function createStudioStore(): StudioStore {
       const past = state.past.slice(0, -1)
       const future = [snapshotOf(state), ...state.future]
       // popped is immutable; clone it so preview-time mutation can't poison history.
+      const restored = popped.clip ? cloneAnimationClip(popped.clip) : null
       set({
         ...state,
-        clip: popped.clip ? cloneAnimationClip(popped.clip) : null,
+        clip: restored,
+        library: libraryWithActiveClip(state, restored),
         clipSnapshot: popped.clip,
         cameraTrack: cloneCameraTrack(popped.camera),
         cameraSnapshot: popped.camera,
@@ -297,9 +441,11 @@ function createStudioStore(): StudioStore {
       const popped = state.future[0]
       const future = state.future.slice(1)
       const past = pushPast(state.past, snapshotOf(state))
+      const restored = popped.clip ? cloneAnimationClip(popped.clip) : null
       set({
         ...state,
-        clip: popped.clip ? cloneAnimationClip(popped.clip) : null,
+        clip: restored,
+        library: libraryWithActiveClip(state, restored),
         clipSnapshot: popped.clip,
         cameraTrack: cloneCameraTrack(popped.camera),
         cameraSnapshot: popped.camera,

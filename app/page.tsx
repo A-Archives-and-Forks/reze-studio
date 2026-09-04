@@ -4,6 +4,7 @@ import dynamic from "next/dynamic"
 import { Studio } from "@/context/studio-context"
 import { Playback } from "@/context/playback-context"
 import { StudioStatusProvider } from "@/components/studio-status"
+import { I18nProvider } from "@/lib/i18n"
 
 /** Resizable panels (Bones/Morphs split) read localStorage on first render via
  *  `useDefaultLayout` — fine in the browser, but Next still executes client
@@ -13,12 +14,14 @@ const StudioPage = dynamic(() => import("@/components/studio").then((m) => m.Stu
 
 export default function Home() {
   return (
-    <Studio>
-      <Playback>
-        <StudioStatusProvider>
-          <StudioPage />
-        </StudioStatusProvider>
-      </Playback>
-    </Studio>
+    <I18nProvider>
+      <Studio>
+        <Playback>
+          <StudioStatusProvider>
+            <StudioPage />
+          </StudioStatusProvider>
+        </Playback>
+      </Studio>
+    </I18nProvider>
   )
 }

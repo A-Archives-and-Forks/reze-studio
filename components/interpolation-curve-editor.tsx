@@ -2,7 +2,7 @@
 
 import { memo, useCallback, useEffect, useRef, useState } from "react"
 import { easeInOut } from "reze-engine"
-import { cn } from "@/lib/utils"
+import { cn, monoFont } from "@/lib/utils"
 
 const SIZE = 160
 const PAD = 16
@@ -180,7 +180,10 @@ export const InterpolationCurveEditor = memo(function InterpolationCurveEditor({
           i === 0
             ? `(${Math.round(a.x)}, ${Math.round(a.y)})`
             : `(${Math.round(b.x)}, ${Math.round(b.y)})`
-        ctx.font = "9px -apple-system, sans-serif"
+        // Mono: these are the two control points' 0–127 coordinates, and they
+        // change under the pointer — proportional digits make the label jitter
+        // as it counts.
+        ctx.font = `9px ${monoFont()}`
         ctx.textAlign = "center"
         ctx.textBaseline = "bottom"
         ctx.fillStyle = cpColor
@@ -337,19 +340,24 @@ export const InterpolationCurveEditor = memo(function InterpolationCurveEditor({
   }
 
   return (
+    // Sized by the panel rather than by SIZE, which stays the canvas's own
+    // coordinate space: the backing store is still SIZE×dpr, and getMousePos
+    // divides by the measured rect, so drawing and hit-testing follow whatever
+    // width the dock gives it. A square is enforced by aspect-ratio because
+    // this plots 0–127 against 0–127 — a stretched one would show an ease that
+    // is not the ease being written.
     <div
       className={cn(
-        "shrink-0 rounded-interior border border-line-strong bg-surface p-0.5",
+        "w-full rounded-interior border border-line-strong bg-surface p-0.5",
         disabled && "pointer-events-none opacity-50",
       )}
-      style={{ width: SIZE + 4, height: SIZE + 4 }}
+      style={{ aspectRatio: "1 / 1", maxWidth: 220 }}
     >
       <canvas
         ref={canvasRef}
         width={SIZE}
         height={SIZE}
-        className="block cursor-default rounded-[3px]"
-        style={{ width: SIZE, height: SIZE }}
+        className="block h-full w-full cursor-default rounded-[3px]"
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}

@@ -84,6 +84,7 @@ A typical workflow in Reze Studio:
 | `Ctrl` / `⌘` + `V`                    | Paste at the playhead                                        |
 | `Ctrl` / `⌘` + `Z`                    | Undo last clip edit                                          |
 | `Ctrl` / `⌘` + `Shift` + `Z`, `⌘`+`Y` | Redo                                                          |
+| `\`                                   | Hide / show the side panels                                   |
 | `←` / `→` _(in frame input)_          | Decrement / increment playhead frame                          |
 | `Shift` + mouse wheel                 | Zoom the value / Y axis                                       |
 | `Ctrl` / `Command` + mouse wheel      | Zoom the time / X axis                                        |

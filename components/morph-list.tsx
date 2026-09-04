@@ -2,6 +2,7 @@
 
 import { memo } from "react"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { useT } from "@/lib/i18n"
 import { cn } from "@/lib/utils"
 import type { AnimationClip } from "reze-engine"
 
@@ -13,11 +14,12 @@ interface MorphListProps {
 }
 
 export const MorphList = memo(function MorphList({ morphNames, clip, selectedMorph, onSelectMorph }: MorphListProps) {
+  const t = useT()
   return (
     <ScrollArea className="h-full">
       <div className="py-1">
         {morphNames.length === 0 ? (
-          <div className="px-3 py-1.5 text-[11px] text-muted-foreground">No morphs</div>
+          <div className="px-3 py-1.5 text-[11px] text-muted-foreground">{t.panel.noMorphs}</div>
         ) : (
           morphNames.map((name) => {
             const kfCount = clip?.morphTracks.get(name)?.length ?? 0

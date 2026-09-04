@@ -27,8 +27,8 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: var(--font-instrument-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -69,6 +69,7 @@
 
 :root {
   --radius: 0.45rem;
+  --ground: oklch(0.96 0 0);
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
   --card: oklch(1 0 0);
@@ -103,6 +104,7 @@
 }
 
 .dark {
+  --ground: oklch(0.105 0 0);
   --background: oklch(0.145 0 0);
   --foreground: oklch(0.985 0 0);
   --card: oklch(0.205 0 0);
@@ -158,22 +160,42 @@
    nothing behind them, so borders carry more of the separation on their own
    and need more contrast: 10%/16%.
 
+   `ground` is what the panels sit ON — a step darker than a panel's own fill,
+   so the gutter between docked panels reads as space rather than as a seam.
+   reze-design gets that separation for free because its panels float over a
+   live 3D canvas; here they are docked, so the ground has to supply it.
+
    Text stays shadcn's two tiers (`text-foreground` / `text-muted-foreground`)
    — never an opacity modifier on either, that's the same tier rendered
    inconsistently, not a third tier.
 
    Radii here are for chrome with its own panel-like footprint (dialogs,
-   floating dropdowns, chips) — 12/8/6. Ordinary controls (buttons, inputs)
-   keep riding the base --radius above.
+   floating dropdowns, chips) — 10/6/4, matching reze-build. Ordinary controls
+   (buttons, inputs) keep riding the base --radius above.
+
+   THREE ACCENTS, ONE MEANING EACH — the literal Tailwind hues, spelled the way
+   reze-design and reze-build spell them, so the family reads as one system:
+
+     blue-400   SELECTED / ACTIVE — the bone or morph row you picked, the
+                camera as edit target, a material, selected keyframes, the
+                clip being edited, and any toggle that is currently on (gizmo
+                shown, camera following the shot, side panels hidden, IK).
+     amber-400  WARNING — it still works, but read this.
+     red-400    DESTRUCTIVE — this removes something.
+
+   One blue for both "what I picked" and "what is on" is deliberate: in this
+   editor they are almost always the same thing, and a second highlight hue
+   makes a reader hunt for a distinction that is not there.
    ───────────────────────────────────────────────────────────────────────── */
 @theme inline {
+  --color-ground: var(--ground);
   --color-surface: var(--background);
   --color-surface-raised: var(--popover);
   --color-scrim: oklch(0.12 0.008 260 / 0.55);
   --color-line: oklch(1 0 0 / 0.1);
   --color-line-strong: oklch(1 0 0 / 0.16);
 
-  --radius-surface: 12px;
-  --radius-interior: 8px;
-  --radius-chip: 6px;
+  --radius-surface: 10px;
+  --radius-interior: 6px;
+  --radius-chip: 4px;
 }

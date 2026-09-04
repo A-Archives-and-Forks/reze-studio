@@ -7,6 +7,7 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { MATERIAL_PRESETS, MATERIAL_PRESET_LABEL, presetForMaterial, setMaterialPreset } from "@/lib/materials"
+import { useT } from "@/lib/i18n"
 import { cn } from "@/lib/utils"
 
 interface MaterialListProps {
@@ -30,6 +31,7 @@ export const MaterialList = memo(function MaterialList({
   onToggleSelect,
   onDeselect,
 }: MaterialListProps) {
+  const t = useT()
   const rows = useMemo(
     () =>
       materialNames.map((name) => ({
@@ -41,15 +43,15 @@ export const MaterialList = memo(function MaterialList({
   )
 
   if (materialNames.length === 0) {
-    return <div className="px-3 py-2 text-[11px] text-muted-foreground">No materials</div>
+    return <div className="px-3 py-2 text-[11px] text-muted-foreground">{t.materials.empty}</div>
   }
 
   return (
     <div className="flex h-full flex-col">
       <div className="flex shrink-0 items-center gap-2 border-b border-line px-4 py-1.5 text-[10px] font-medium tracking-widest text-muted-foreground">
-        <EyeIcon className="size-3 shrink-0" aria-label="Visible" />
-        <span className="min-w-0 flex-1 truncate">Material</span>
-        <span className="w-28 shrink-0">Style Group</span>
+        <EyeIcon className="size-3 shrink-0" aria-label={t.materials.visible} />
+        <span className="min-w-0 flex-1 truncate">{t.materials.material}</span>
+        <span className="w-28 shrink-0">{t.materials.styleGroup}</span>
       </div>
       {/* Click-on-blank-area deselects — fires only when the click lands on
           the flex container itself (empty space below the last row), not on

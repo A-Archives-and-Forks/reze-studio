@@ -87,7 +87,18 @@ export type DraftExtras = {
   timelineView?: StoredTimelineView
 }
 
-type StoredDraft = DraftExtras & { clipDisplayName: string; clip: SerializedClip }
+/** One library entry on disk. The clip needs the same hand-rolled encoding the
+ *  active clip has always needed — Quat and Vec3 do not survive a structured
+ *  clone with their prototypes. */
+type SerializedLibraryEntry = { id: string; name: string; clip: SerializedClip }
+
+type StoredDraft = DraftExtras & {
+  clipDisplayName: string
+  /** The pre-library shape: one clip, no library. Still read, never written. */
+  clip?: SerializedClip
+  library?: SerializedLibraryEntry[]
+  activeClipId?: string
+}
 
 export function serializeClip(clip: AnimationClip): SerializedClip {
   const boneTracks: [string, SerializedBoneKeyframe[]][] = Array.from(clip.boneTracks, ([name, track]) => [
@@ -150,14 +161,20 @@ function open(): Promise<IDBDatabase | null> {
 let pendingWrite: ReturnType<typeof setTimeout> | null = null
 let pendingRun: (() => void) | null = null
 
-async function write(clipDisplayName: string, clip: AnimationClip, extras: DraftExtras) {
+async function write(
+  clipDisplayName: string,
+  library: readonly DraftLibraryEntry[],
+  activeClipId: string | null,
+  extras: DraftExtras,
+) {
   const db = await open()
   if (!db) return
   try {
     const payload: StoredDraft = {
       ...extras,
       clipDisplayName,
-      clip: serializeClip(clip),
+      library: library.map((e) => ({ id: e.id, name: e.name, clip: serializeClip(e.clip) })),
+      activeClipId: activeClipId ?? undefined,
     }
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE, "readwrite")
@@ -166,9 +183,7 @@ async function write(clipDisplayName: string, clip: AnimationClip, extras: Draft
       tx.onerror = () => reject(tx.error)
       tx.onabort = () => reject(tx.error)
     })
-    console.info(
-      `[draft] saved "${clipDisplayName}" — ${payload.clip.boneTracks.length} bone tracks, ${payload.clip.morphTracks.length} morph tracks`,
-    )
+    console.info(`[draft] saved "${clipDisplayName}" — ${payload.library?.length ?? 0} clip(s)`)
   } catch (e) {
     console.warn("[draft] IndexedDB write failed — the current draft will not survive a reload", e)
   } finally {
@@ -176,10 +191,19 @@ async function write(clipDisplayName: string, clip: AnimationClip, extras: Draft
   }
 }
 
-export function saveDraftSoon(clipDisplayName: string, clip: AnimationClip, extras: DraftExtras = {}, ms = 150): void {
+/** What the store holds, in the shape this module needs to write it. */
+export type DraftLibraryEntry = { id: string; name: string; clip: AnimationClip }
+
+export function saveDraftSoon(
+  clipDisplayName: string,
+  library: readonly DraftLibraryEntry[],
+  activeClipId: string | null,
+  extras: DraftExtras = {},
+  ms = 150,
+): void {
   if (pendingWrite) clearTimeout(pendingWrite)
   pendingRun = () => {
-    void write(clipDisplayName, clip, extras)
+    void write(clipDisplayName, library, activeClipId, extras)
   }
   pendingWrite = setTimeout(() => {
     pendingWrite = null
@@ -205,7 +229,13 @@ export function flushDraftWrite(): void {
   run?.()
 }
 
-export async function loadDraft(): Promise<({ clipDisplayName: string; clip: AnimationClip } & DraftExtras) | null> {
+export type LoadedDraft = DraftExtras & {
+  clipDisplayName: string
+  library: DraftLibraryEntry[]
+  activeClipId: string | null
+}
+
+export async function loadDraft(): Promise<LoadedDraft | null> {
   const db = await open()
   if (!db) return null
   try {
@@ -218,13 +248,23 @@ export async function loadDraft(): Promise<({ clipDisplayName: string; clip: Ani
       console.info("[draft] no stored draft found")
       return null
     }
-    console.info(
-      `[draft] restoring "${rec.clipDisplayName}" — ${rec.clip.boneTracks.length} bone tracks, ${rec.clip.morphTracks.length} morph tracks`,
-    )
-    return {
-      ...rec,
-      clip: deserializeClip(rec.clip),
+    // A record written before the library existed carries one clip and no id.
+    // Reading it as a one-entry library is the whole migration — the shapes are
+    // the same document, described twice.
+    const stored: SerializedLibraryEntry[] =
+      rec.library && rec.library.length > 0
+        ? rec.library
+        : rec.clip
+          ? [{ id: "restored", name: rec.clipDisplayName, clip: rec.clip }]
+          : []
+    if (stored.length === 0) {
+      console.info("[draft] stored draft held no clips")
+      return null
     }
+    const library = stored.map((e) => ({ id: e.id, name: e.name, clip: deserializeClip(e.clip) }))
+    const activeClipId = library.some((e) => e.id === rec.activeClipId) ? rec.activeClipId! : library[0].id
+    console.info(`[draft] restoring "${rec.clipDisplayName}" — ${library.length} clip(s)`)
+    return { ...rec, library, activeClipId }
   } catch (e) {
     console.warn("[draft] stored draft failed to load — starting fresh", e)
     return null

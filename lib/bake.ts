@@ -1,0 +1,306 @@
+// Tracks and placements → the one flat AnimationClip the engine plays.
+//
+// The engine has no idea any of this exists, and that is deliberate: reze-engine
+// plays a clip, and every layering decision here is a decision about a DOCUMENT.
+// `Model.setBlendPose` exists and is the wrong tool — it averages a missing bone
+// toward the rest pose, so a face-only clip laid over a dance would drag the
+// body halfway back to a T-pose. Layering wants replacement, not averaging.
+//
+// TWO RULES, and everything below is their consequence.
+//
+// 1. OWNERSHIP IS PER FRAME, PER NAME. At each frame, for each bone / morph /
+//    IK chain, the topmost active track with a placement covering that frame
+//    whose clip keys that name owns it there. Nothing else contributes.
+//
+//    Per NAME is what lets a face-only VMD and a body-only VMD compose with no
+//    mask UI, which is the composition MMD users already expect because the
+//    scene ships motions in exactly those two halves. Per FRAME is what lets a
+//    120-frame hand clip override the dance's wrists for those 120 frames and
+//    hand them back afterwards — owning a name for the whole timeline would
+//    blank the dance's hands either side of it.
+//
+// 2. CUTS ARE EXACT. Where ownership changes in the middle of a keyframe
+//    interval, the boundary key carries the pose sampled there and the
+//    segment's easing is SPLIT rather than copied, so the motion inside the cut
+//    is the motion the source clip had. See splitInterpolation in lib/utils.
+//
+// A frame no placement covers for a name emits nothing, and the engine holds
+// the last key — which is what VMD does between keys anyway.
+
+import type { AnimationClip, BoneInterpolation, BoneKeyframe, IkKeyframe, MorphKeyframe } from "reze-engine"
+import { Vec3 } from "reze-engine"
+import {
+  activeTracks,
+  clipById,
+  offsetOf,
+  outOf,
+  placementEnd,
+  projectEnd,
+  type Placement,
+  type Project,
+} from "@/lib/project"
+import {
+  cloneBoneInterpolation,
+  evalBoneTrackAt,
+  splitInterpolation,
+  VMD_LINEAR_DEFAULT_IP,
+} from "@/lib/utils"
+import { sampleMorphTrackAt } from "@/lib/animation"
+
+/** One stretch of arrangement frames that a single placement owns for one name. */
+type Interval = { from: number; to: number; placement: Placement; clip: AnimationClip }
+
+type TrackKind = "bone" | "morph" | "ik"
+
+function tracksOfKind(clip: AnimationClip, kind: TrackKind): Map<string, unknown[]> | undefined {
+  if (kind === "bone") return clip.boneTracks as unknown as Map<string, unknown[]>
+  if (kind === "morph") return clip.morphTracks as unknown as Map<string, unknown[]>
+  return clip.ikTracks as unknown as Map<string, unknown[]> | undefined
+}
+
+/**
+ * Which placement owns `name` over which arrangement frames.
+ *
+ * Walks tracks top to bottom, and each track claims only the frames still
+ * unclaimed — so a lower track keeps the stretches the ones above it do not
+ * cover. Result is sorted and disjoint.
+ */
+function ownershipIntervals(project: Project, kind: TrackKind, name: string): Interval[] {
+  const claimed: Interval[] = []
+  const overlapsClaimed = (from: number, to: number) => claimed.some((c) => from < c.to && to > c.from)
+
+  for (const track of activeTracks(project)) {
+    for (const placement of track.placements) {
+      const lib = clipById(project, placement.clipId)
+      if (!lib) continue
+      const keys = tracksOfKind(lib.clip, kind)?.get(name)
+      if (!keys || keys.length === 0) continue
+      const from = placement.start
+      const to = placementEnd(placement, lib.clip)
+      if (to <= from) continue
+      if (!overlapsClaimed(from, to)) {
+        claimed.push({ from, to, placement, clip: lib.clip })
+        continue
+      }
+      // Partly covered already: keep only the gaps this placement can still
+      // fill. A lower track showing through either side of a short clip above
+      // it is the whole point of per-frame ownership.
+      const blockers = claimed
+        .filter((c) => from < c.to && to > c.from)
+        .sort((a, b) => a.from - b.from)
+      let cursor = from
+      for (const b of blockers) {
+        if (b.from > cursor) claimed.push({ from: cursor, to: b.from, placement, clip: lib.clip })
+        cursor = Math.max(cursor, b.to)
+      }
+      if (cursor < to) claimed.push({ from: cursor, to, placement, clip: lib.clip })
+    }
+  }
+  return claimed.sort((a, b) => a.from - b.from)
+}
+
+/**
+ * The bone keys `interval` contributes, in arrangement frames.
+ *
+ * `isFirst` and `hasFollower` are about the FLAT track this is being written
+ * into, not about the interval itself, and they decide the two boundary keys:
+ *
+ * - The first interval's opening key keeps the curve it was authored with,
+ *   because nothing precedes it and that curve is still the file's own. A later
+ *   interval's opening key is linear-in: what precedes it there is the previous
+ *   owner's closing key, one frame earlier, and inheriting an easing authored
+ *   for a hundred-frame segment to cover a single frame is meaningless.
+ *
+ * - The closing key is written when the boundary would otherwise be crossed by
+ *   an interpolation that ignores it, which happens two ways: another interval
+ *   follows and the flat track would run from this owner's last real key into
+ *   the next owner's first one, or this owner's own source keeps moving past
+ *   the cut and the flat track would freeze at its last key inside. When
+ *   neither is true the engine's hold is already the right answer, and pinning
+ *   it would put a key into every exported VMD that the source never had.
+ */
+function bakeBoneInterval(
+  interval: Interval,
+  name: string,
+  isFirst: boolean,
+  hasFollower: boolean,
+): BoneKeyframe[] {
+  const { from, to, placement, clip } = interval
+  const source = clip.boneTracks.get(name)
+  if (!source || source.length === 0) return []
+  const offset = offsetOf(placement)
+  const localFrom = from - offset
+  const localLast = to - 1 - offset
+  const out: BoneKeyframe[] = []
+
+  const keyAt = (local: number) => source.find((k) => k.frame === local) ?? null
+  const copyOf = (k: BoneKeyframe, frame: number, ip?: BoneInterpolation): BoneKeyframe => ({
+    boneName: name,
+    frame,
+    rotation: k.rotation.clone(),
+    translation: new Vec3(k.translation.x, k.translation.y, k.translation.z),
+    interpolation: ip ?? cloneBoneInterpolation(k.interpolation),
+  })
+  /** A key the source does not have, holding the pose the source is in there. */
+  const sampled = (local: number, frame: number, ip = cloneBoneInterpolation(VMD_LINEAR_DEFAULT_IP)): BoneKeyframe => {
+    const pose = evalBoneTrackAt(source, local)
+    return { boneName: name, frame, rotation: pose.rotation, translation: pose.translation, interpolation: ip }
+  }
+
+  // The segment the interval's start falls inside, if it falls inside one —
+  // that is the curve that has to be divided.
+  const beforeStart = [...source].reverse().find((k) => k.frame < localFrom) ?? null
+  const afterStart = source.find((k) => k.frame > localFrom) ?? null
+  const startKey = keyAt(localFrom)
+
+  if (startKey) {
+    out.push(copyOf(startKey, from, isFirst ? undefined : cloneBoneInterpolation(VMD_LINEAR_DEFAULT_IP)))
+  } else {
+    out.push(sampled(localFrom, from))
+  }
+
+  // Every real key inside, the last frame included.
+  for (const k of source) {
+    if (k.frame <= localFrom || k.frame > localLast) continue
+    // The first real key after a synthesized opening now closes a SHORTER
+    // segment than the one its curve was authored for, so it takes the right
+    // half of that curve.
+    if (!startKey && afterStart && k.frame === afterStart.frame && beforeStart) {
+      const span = k.frame - beforeStart.frame
+      const t = span > 0 ? (localFrom - beforeStart.frame) / span : 0
+      out.push(copyOf(k, k.frame + offset, splitInterpolation(k.interpolation, t).right))
+    } else {
+      out.push(copyOf(k, k.frame + offset))
+    }
+  }
+
+  const after = source.find((k) => k.frame > localLast) ?? null
+  if ((hasFollower || after !== null) && localLast > localFrom && !keyAt(localLast)) {
+    const before = [...source].reverse().find((k) => k.frame < localLast) ?? null
+    let ip = cloneBoneInterpolation(VMD_LINEAR_DEFAULT_IP)
+    if (before && after) {
+      const span = after.frame - before.frame
+      const t = span > 0 ? (localLast - before.frame) / span : 0
+      // This key now CLOSES the segment that ran from `before`, so it wears the
+      // left half of that segment's curve.
+      ip = splitInterpolation(after.interpolation, t).left
+    }
+    out.push(sampled(localLast, to - 1, ip))
+  }
+  return out
+}
+
+function bakeMorphInterval(interval: Interval, name: string, hasFollower: boolean): MorphKeyframe[] {
+  const { from, to, placement, clip } = interval
+  const source = clip.morphTracks.get(name)
+  if (!source || source.length === 0) return []
+  const offset = offsetOf(placement)
+  const localFrom = from - offset
+  const localLast = to - 1 - offset
+  const out: MorphKeyframe[] = []
+  // Morph tracks carry no curve — VMD lerps them — so a boundary is just the
+  // sampled weight, and there is nothing to split.
+  out.push({ morphName: name, frame: from, weight: sampleMorphTrackAt(source, localFrom) })
+  for (const k of source) {
+    if (k.frame <= localFrom || k.frame > localLast) continue
+    out.push({ morphName: name, frame: k.frame + offset, weight: k.weight })
+  }
+  const continues = source.some((k) => k.frame > localLast)
+  const closed = source.some((k) => k.frame === localLast)
+  if ((hasFollower || continues) && localLast > localFrom && !closed) {
+    out.push({ morphName: name, frame: to - 1, weight: sampleMorphTrackAt(source, localLast) })
+  }
+  return out
+}
+
+function bakeIkInterval(interval: Interval, name: string): IkKeyframe[] {
+  const { from, to, placement, clip } = interval
+  const source = clip.ikTracks?.get(name)
+  if (!source || source.length === 0) return []
+  const offset = offsetOf(placement)
+  const localFrom = from - offset
+  const localLast = to - 1 - offset
+  // IK keys are steps: the state holds until the next one changes it, so the
+  // boundary carries whatever was in force there and the rest copy across.
+  let state = source[0].enabled
+  for (const k of source) {
+    if (k.frame <= localFrom) state = k.enabled
+    else break
+  }
+  const out: IkKeyframe[] = [{ frame: from, enabled: state }]
+  for (const k of source) {
+    if (k.frame <= localFrom || k.frame > localLast) continue
+    out.push({ frame: k.frame + offset, enabled: k.enabled })
+  }
+  return out
+}
+
+/** Sort by frame; where two land on one frame the later one wins, which is the
+ *  order intervals were emitted in. */
+function dedupe<T extends { frame: number }>(keys: T[]): T[] {
+  keys.sort((a, b) => a.frame - b.frame)
+  const out: T[] = []
+  for (const k of keys) {
+    if (out.length > 0 && out[out.length - 1].frame === k.frame) out[out.length - 1] = k
+    else out.push(k)
+  }
+  return out
+}
+
+/** Every name of one kind that any active placement keys. */
+function namesOfKind(project: Project, kind: TrackKind): string[] {
+  const names = new Set<string>()
+  for (const track of activeTracks(project)) {
+    for (const placement of track.placements) {
+      const lib = clipById(project, placement.clipId)
+      if (!lib) continue
+      const map = tracksOfKind(lib.clip, kind)
+      if (!map) continue
+      for (const [name, keys] of map) if (keys.length > 0) names.add(name)
+    }
+  }
+  return [...names].sort()
+}
+
+/** One name's baked keys, in arrangement frames. Exported so a drag can re-bake
+ *  the single bone it is moving instead of the whole project. */
+export function bakeName(project: Project, kind: "bone", name: string): BoneKeyframe[]
+export function bakeName(project: Project, kind: "morph", name: string): MorphKeyframe[]
+export function bakeName(project: Project, kind: "ik", name: string): IkKeyframe[]
+export function bakeName(
+  project: Project,
+  kind: TrackKind,
+  name: string,
+): BoneKeyframe[] | MorphKeyframe[] | IkKeyframe[] {
+  const intervals = ownershipIntervals(project, kind, name)
+  const last = intervals.length - 1
+  if (kind === "bone") {
+    return dedupe(intervals.flatMap((iv, i) => bakeBoneInterval(iv, name, i === 0, i < last)))
+  }
+  if (kind === "morph") {
+    return dedupe(intervals.flatMap((iv, i) => bakeMorphInterval(iv, name, i < last)))
+  }
+  return dedupe(intervals.flatMap((i) => bakeIkInterval(i, name)))
+}
+
+/** The whole arrangement as one clip. */
+export function bakeProject(project: Project, cameraLastFrame = 0): AnimationClip {
+  const boneTracks = new Map<string, BoneKeyframe[]>()
+  for (const name of namesOfKind(project, "bone")) {
+    const keys = bakeName(project, "bone", name)
+    if (keys.length > 0) boneTracks.set(name, keys)
+  }
+  const morphTracks = new Map<string, MorphKeyframe[]>()
+  for (const name of namesOfKind(project, "morph")) {
+    const keys = bakeName(project, "morph", name)
+    if (keys.length > 0) morphTracks.set(name, keys)
+  }
+  let ikTracks: Map<string, IkKeyframe[]> | undefined
+  for (const name of namesOfKind(project, "ik")) {
+    const keys = bakeName(project, "ik", name)
+    if (keys.length === 0) continue
+    if (!ikTracks) ikTracks = new Map()
+    ikTracks.set(name, keys)
+  }
+  return { boneTracks, morphTracks, ikTracks, frameCount: projectEnd(project, cameraLastFrame) }
+}

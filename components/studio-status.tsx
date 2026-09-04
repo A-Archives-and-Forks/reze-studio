@@ -16,6 +16,7 @@ import {
   useSyncExternalStore,
   type ReactNode,
 } from "react"
+import { useT } from "@/lib/i18n"
 import { cn } from "@/lib/utils"
 
 export type StudioStatusState = {
@@ -108,6 +109,7 @@ export const StudioStatusFooter = memo(function StudioStatusFooter({
   ikEnabled: boolean
   appVersion: string
 }) {
+  const t = useT()
   const pmxFileName = useStudioStatusSelector((s) => s.pmxFileName)
   const fps = useStudioStatusSelector((s) => s.fps)
   const message = useStudioStatusSelector((s) => s.message)
@@ -119,7 +121,7 @@ export const StudioStatusFooter = memo(function StudioStatusFooter({
     >
       <div className="flex min-w-0 shrink-0 items-center gap-x-2 [overflow-wrap:anywhere]">
         <span>
-          Model:{" "}
+          {t.footer.model}:{" "}
           <span className="font-medium text-foreground" title={pmxFileName}>
             {pmxFileName}
           </span>
@@ -128,7 +130,7 @@ export const StudioStatusFooter = memo(function StudioStatusFooter({
           ·
         </span>
         <span>
-          Animation:{" "}
+          {t.footer.animation}:{" "}
           <span className="font-medium text-foreground" title={hasClip ? `${clipDisplayName}.vmd` : undefined}>
             {hasClip ? `${clipDisplayName}.vmd` : "—"}
           </span>
@@ -136,16 +138,16 @@ export const StudioStatusFooter = memo(function StudioStatusFooter({
         <span className="text-muted-foreground" aria-hidden>
           ·
         </span>
-        <span title="Whether this clip's IK chains solve — Settings menu to change">
-          IK:{" "}
+        <span title={t.footer.ikTitle}>
+          {t.footer.ik}:{" "}
           <span className={cn("font-medium", ikEnabled ? "text-foreground" : "text-amber-400")}>
-            {ikEnabled ? "On" : "Off"}
+            {ikEnabled ? t.footer.on : t.footer.off}
           </span>
         </span>
       </div>
       <div className="min-w-0 flex-1 truncate px-2 text-left text-[10px] text-muted-foreground">{message}</div>
       <div className="flex shrink-0 items-center gap-x-2 tabular-nums">
-        <span title="Main-thread / compositor frame rate">{fps != null ? `${fps} FPS` : "— FPS"}</span>
+        <span title={t.footer.fpsTitle}>{fps != null ? `${fps} FPS` : "— FPS"}</span>
         <span className="text-muted-foreground" aria-hidden>
           ·
         </span>

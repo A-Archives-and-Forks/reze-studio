@@ -7,6 +7,40 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
+// ─── Canvas typography ────────────────────────────────────────────────────
+// `next/font` hashes the family name it registers (`__JetBrains_Mono_abc123`),
+// so a canvas cannot ask for "JetBrains Mono" by name and get the face the DOM
+// is using — it silently falls back, and the timeline ends up lettered in a
+// different font from the panels around it. The generated name is reachable
+// only through the CSS variable, so that is where these read it from.
+//
+// Cached after the first successful read: `getComputedStyle` is a layout-flush
+// hazard and the timeline sets `ctx.font` dozens of times per repaint.
+
+function cssFontStack(varName: string, fallback: string): string {
+  if (typeof window === "undefined") return fallback
+  const v = getComputedStyle(document.documentElement).getPropertyValue(varName).trim()
+  return v || fallback
+}
+
+let monoStack: string | null = null
+/** The face the timeline, rulers and numeric readouts draw in. */
+export function monoFont(): string {
+  if (monoStack == null) {
+    monoStack = cssFontStack("--font-mono", "ui-monospace, SFMono-Regular, Menlo, monospace")
+  }
+  return monoStack
+}
+
+let sansStack: string | null = null
+/** The face canvas-drawn UI labels draw in — the same one the chrome uses. */
+export function sansFont(): string {
+  if (sansStack == null) {
+    sansStack = cssFontStack("--font-sans", "ui-sans-serif, system-ui, sans-serif")
+  }
+  return sansStack
+}
+
 // ─── Clip length (ruler / export end vs last key) ─────────────────────────
 /** New / reset studio clips start here so transport + ruler work before any keys (30fps → 4s). */
 export const DEFAULT_STUDIO_CLIP_FRAMES = 120
@@ -92,6 +126,175 @@ export const VMD_LINEAR_DEFAULT_IP: BoneInterpolation = {
     { x: 20, y: 20 },
     { x: 107, y: 107 },
   ],
+}
+
+// ─── Splitting a segment without changing what it does ───────────────────
+/**
+ * One channel's easing curve, cut at `t` into the two curves that reproduce it.
+ *
+ * The problem this solves: putting a keyframe in the middle of an existing
+ * segment changes the motion. The new key inherits a copy of some neighbour's
+ * handles, and a curve authored to ease across the whole segment now eases
+ * across half of it — twice, with a flat spot where they meet. Clip mode hits
+ * this on every cut, since trimming and splitting land boundary keys wherever
+ * the user drags, so the bake has to be able to divide a curve honestly.
+ *
+ * A VMD channel is a cubic from (0,0) to (127,127) with the two stored handles
+ * as its control points. Splitting it is de Casteljau at the bezier parameter
+ * `s` where the curve's TIME coordinate reaches `t` — not at `s = t`, which is
+ * the mistake that makes an eased cut drift. Time is monotonic across the
+ * segment (MMD keeps both handles inside the box), so `s` comes from bisection.
+ *
+ * Each half is then renormalised into its own (0,0)–(127,127) box, which is
+ * what makes the two halves reproduce the original rather than merely resemble
+ * it: the left half's values are divided by the value at the cut, and dividing
+ * by it is exactly the `lerp(A, V, e) = lerp(A, B, ease)` identity rearranged.
+ * Rotation gets the same treatment for the same reason — a slerp is linear in
+ * its own parameter, so easing that parameter is the same problem in one
+ * dimension.
+ *
+ * Returns the linear pair for a degenerate cut (one at, or numerically at, a
+ * segment end), where one half has no width or no height to normalise by.
+ */
+const LINEAR_PAIR: readonly ControlPoint[] = [
+  { x: 20, y: 20 },
+  { x: 107, y: 107 },
+]
+
+function bezierAt(p0: number, p1: number, p2: number, p3: number, s: number): number {
+  const u = 1 - s
+  return u * u * u * p0 + 3 * u * u * s * p1 + 3 * u * s * s * p2 + s * s * s * p3
+}
+
+/** Worst deviation of `cp` from `target` over the segment, in eased units. */
+function pairDeviation(cp: ControlPoint[], target: (u: number) => number): number {
+  let worst = 0
+  for (let i = 1; i < 16; i++) {
+    const u = i / 16
+    worst = Math.max(worst, Math.abs(interpolateControlPoints(cp, u) - target(u)))
+  }
+  return worst
+}
+
+/**
+ * The best handles the format can hold for a curve it cannot hold exactly.
+ *
+ * Splitting a steep or overshooting segment wants control points outside the
+ * 0–127 box, and VMD has nowhere to put them — clamping is then a guess, and
+ * on the editor's own "Over" preset it is a visibly wrong one. So when the
+ * quantised split misses, the half is re-fitted against the exact curve it is
+ * supposed to reproduce: a coarse sweep of the handle space, then a tighter
+ * pass around the winner. Same shape as simplifyBoneTrack's fitting below, and
+ * for the same reason — this is the one operation where the format, not the
+ * maths, is the limit.
+ */
+function refitPair(seed: ControlPoint[], target: (u: number) => number): ControlPoint[] {
+  let best = seed
+  let bestErr = pairDeviation(seed, target)
+  const consider = (x1: number, y1: number, x2: number, y2: number) => {
+    const cand = [
+      { x: x1, y: y1 },
+      { x: x2, y: y2 },
+    ]
+    const err = pairDeviation(cand, target)
+    if (err < bestErr) {
+      bestErr = err
+      best = cand
+    }
+  }
+  for (const x1 of COARSE_HANDLES)
+    for (const y1 of COARSE_HANDLES)
+      for (const x2 of COARSE_HANDLES) for (const y2 of COARSE_HANDLES) consider(x1, y1, x2, y2)
+  const [b1, b2] = best
+  for (const dx1 of REFINE_DELTAS)
+    for (const dy1 of REFINE_DELTAS)
+      for (const dx2 of REFINE_DELTAS)
+        for (const dy2 of REFINE_DELTAS)
+          consider(clamp127(b1.x + dx1), clamp127(b1.y + dy1), clamp127(b2.x + dx2), clamp127(b2.y + dy2))
+  return best
+}
+
+/** Above this the split is re-fitted rather than accepted — a tenth of the
+ *  gap that copying a neighbour's handles opens, and far below what reads as
+ *  motion changing. */
+const SPLIT_TOLERANCE = 0.004
+
+export function splitInterpolationPair(
+  cp: readonly ControlPoint[],
+  t: number,
+): { left: ControlPoint[]; right: ControlPoint[] } {
+  const linear = () => ({
+    left: LINEAR_PAIR.map((p) => ({ ...p })),
+    right: LINEAR_PAIR.map((p) => ({ ...p })),
+  })
+  if (t <= 0 || t >= 1 || !Number.isFinite(t)) return linear()
+  const p1 = cp[0] ?? LINEAR_PAIR[0]
+  const p2 = cp[1] ?? LINEAR_PAIR[1]
+
+  // The bezier parameter at which the curve's x reaches t·127. Bisection
+  // rather than a solve: x is monotonic here, 40 halvings put it well inside
+  // the 1/127 the result is rounded to anyway, and it cannot diverge.
+  const targetX = t * 127
+  let lo = 0
+  let hi = 1
+  let s = t
+  for (let i = 0; i < 40; i++) {
+    s = (lo + hi) / 2
+    if (bezierAt(0, p1.x, p2.x, 127, s) < targetX) lo = s
+    else hi = s
+  }
+
+  const lerp = (a: number, b: number) => a + (b - a) * s
+  // de Casteljau, both coordinates at once.
+  const ax = lerp(0, p1.x), ay = lerp(0, p1.y)
+  const bx = lerp(p1.x, p2.x), by = lerp(p1.y, p2.y)
+  const cx = lerp(p2.x, 127), cy = lerp(p2.y, 127)
+  const dx = lerp(ax, bx), dy = lerp(ay, by)
+  const ex = lerp(bx, cx), ey = lerp(by, cy)
+  // The point the curve is cut at — the new keyframe's own time and value.
+  const mx = lerp(dx, ex), my = lerp(dy, ey)
+
+  const wl = mx, hl = my
+  const wr = 127 - mx, hr = 127 - my
+  if (wl < 1e-4 || hl < 1e-4 || wr < 1e-4 || hr < 1e-4) return linear()
+
+  const ease = (u: number) => interpolateControlPoints(cp as ControlPoint[], u)
+  const cut = ease(t)
+  if (cut < 1e-6 || cut > 1 - 1e-6) return linear()
+
+  const q = (v: number) => Math.max(0, Math.min(127, Math.round(v)))
+  let left = [
+    { x: q((ax / wl) * 127), y: q((ay / hl) * 127) },
+    { x: q((dx / wl) * 127), y: q((dy / hl) * 127) },
+  ]
+  let right = [
+    { x: q(((ex - mx) / wr) * 127), y: q(((ey - my) / hr) * 127) },
+    { x: q(((cx - mx) / wr) * 127), y: q(((cy - my) / hr) * 127) },
+  ]
+
+  // What each half has to reproduce, read straight off the original rather
+  // than off the split — so a half whose ideal handles did not fit in the box
+  // is measured against the truth, not against the compromise.
+  const leftTarget = (u: number) => ease(u * t) / cut
+  const rightTarget = (u: number) => (ease(t + u * (1 - t)) - cut) / (1 - cut)
+  if (pairDeviation(left, leftTarget) > SPLIT_TOLERANCE) left = refitPair(left, leftTarget)
+  if (pairDeviation(right, rightTarget) > SPLIT_TOLERANCE) right = refitPair(right, rightTarget)
+  return { left, right }
+}
+
+/** All four channels of a bone keyframe's interpolation, split at `t`. */
+export function splitInterpolation(
+  ip: BoneInterpolation,
+  t: number,
+): { left: BoneInterpolation; right: BoneInterpolation } {
+  const r = splitInterpolationPair(ip.rotation, t)
+  const x = splitInterpolationPair(ip.translationX, t)
+  const y = splitInterpolationPair(ip.translationY, t)
+  const z = splitInterpolationPair(ip.translationZ, t)
+  return {
+    left: { rotation: r.left, translationX: x.left, translationY: y.left, translationZ: z.left },
+    right: { rotation: r.right, translationX: x.right, translationY: y.right, translationZ: z.right },
+  }
 }
 
 export function cloneBoneInterpolation(ip: BoneInterpolation): BoneInterpolation {
