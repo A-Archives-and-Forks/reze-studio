@@ -27,6 +27,8 @@ import {
   VMD_LINEAR_DEFAULT_IP,
 } from "@/lib/utils"
 import { useT, type Dictionary } from "@/lib/i18n"
+import { useEngineClip } from "@/lib/engine-sync"
+import { useActiveOffset } from "@/components/arrange-view"
 import { useStudioActions, useStudioSelector } from "@/context/studio-context"
 import { usePlaybackFrameRef, usePlaybackSelector } from "@/context/playback-context"
 
@@ -210,6 +212,7 @@ function useLivePose(
   modelRef: RefObject<Model | null>,
   selectedBone: string | null,
   clip: AnimationClip | null,
+  offset: number,
 ): LivePose | null {
   const playing = usePlaybackSelector((s) => s.playing)
   const currentFrame = usePlaybackSelector((s) => s.currentFrame)
@@ -232,12 +235,12 @@ function useLivePose(
     // During playback we skip the snap — fractional frames rarely land on a
     // keyframe, and the engine pose is already the interpolated truth.
     if (!playing) {
-      const frameInt = Math.round(Math.max(0, cf))
+      const frameInt = Math.round(Math.max(0, cf - offset))
       const kfAt = clip.boneTracks.get(selectedBone)?.find((k) => k.frame === frameInt)
       if (kfAt) return { euler: quatToEuler(kfAt.rotation), translation: kfAt.translation }
     }
     return { euler: quatToEuler(p.rotation), translation: p.translation }
-  }, [modelRef, selectedBone, clip, playing, playbackFrameRef])
+  }, [modelRef, selectedBone, clip, playing, playbackFrameRef, offset])
 
   const apply = useCallback((next: LivePose | null) => {
     setLivePose((prev) => {
@@ -280,6 +283,7 @@ function useLivePose(
 function useLiveActiveKeyframe(
   clip: AnimationClip | null,
   selectedBone: string | null,
+  offset: number,
 ): BoneKeyframe | null {
   const playing = usePlaybackSelector((s) => s.playing)
   const currentFrame = usePlaybackSelector((s) => s.currentFrame)
@@ -288,8 +292,8 @@ function useLiveActiveKeyframe(
 
   const sample = useCallback((): BoneKeyframe | null => {
     if (!clip || !selectedBone) return null
-    return sampleBoneKeyframe(clip, selectedBone, playbackFrameRef.current)
-  }, [clip, selectedBone, playbackFrameRef])
+    return sampleBoneKeyframe(clip, selectedBone, playbackFrameRef.current - offset)
+  }, [clip, selectedBone, playbackFrameRef, offset])
 
   const apply = useCallback((next: BoneKeyframe | null) => {
     setKf((prev) => (prev === next ? prev : next))
@@ -321,6 +325,7 @@ function useLiveMorphWeight(
   modelRef: RefObject<Model | null>,
   selectedMorph: string | null,
   clip: AnimationClip | null,
+  offset: number,
 ): number | null {
   const playing = usePlaybackSelector((s) => s.playing)
   const currentFrame = usePlaybackSelector((s) => s.currentFrame)
@@ -338,7 +343,7 @@ function useLiveMorphWeight(
     // live value is whatever the last seek left, which can lag a commit by a
     // frame. Same reasoning as useLivePose's keyframe snap.
     if (!playing) {
-      const f = Math.round(Math.max(0, currentFrame))
+      const f = Math.round(Math.max(0, currentFrame - offset))
       const kfAt = clip?.morphTracks.get(selectedMorph)?.find((k) => k.frame === f)
       if (kfAt) return kfAt.weight
     }
@@ -346,7 +351,7 @@ function useLiveMorphWeight(
     const idx = morphing.morphs.findIndex((m) => m.name === selectedMorph)
     if (idx < 0) return null
     return model.getMorphWeights()[idx] ?? null
-  }, [modelRef, selectedMorph, clip, playing, currentFrame])
+  }, [modelRef, selectedMorph, clip, playing, currentFrame, offset])
 
   const apply = useCallback((next: number | null) => {
     setWeight((prev) => (prev === next ? prev : next))
@@ -408,6 +413,10 @@ export const PropertiesInspector = memo(function PropertiesInspector({
   clipVersion,
 }: PropertiesInspectorProps) {
   const t = useT()
+  const toEngineClip = useEngineClip()
+  // The playhead is an ARRANGEMENT frame; keyframes are stored in the clip's
+  // own. Everything below that turns one into the other goes through this.
+  const activeOffset = useActiveOffset()
   const clip = useStudioSelector((s) => s.clip)
   const selectedBone = useStudioSelector((s) => s.selectedBone)
   const selectedMorph = useStudioSelector((s) => s.selectedMorph)
@@ -437,7 +446,7 @@ export const PropertiesInspector = memo(function PropertiesInspector({
   // themes. Ghost + those tokens is what makes an operations chip look like
   // it belongs to this panel rather than a default.
   const opRow =
-    "h-6 flex-1 rounded-chip border border-line-strong bg-surface-raised px-0.5 text-[10px] text-muted-foreground hover:text-foreground"
+    "h-6 flex-1 rounded-chip border border-line-strong bg-surface-raised px-0.5 text-[11px] text-muted-foreground hover:text-foreground"
   // Delete / Cut / Clear remove something, so they read as a different KIND
   // of action from Insert/Copy/Paste/Simplify, not just a different label in
   // the same gray.
@@ -467,7 +476,7 @@ export const PropertiesInspector = memo(function PropertiesInspector({
       const model = modelRef.current
       if (!selectedBone || !clip || !model) return
       const cf = playbackFrameRef.current
-      const frame = Math.round(Math.max(0, Math.min(clip.frameCount, cf)))
+      const frame = Math.round(Math.max(0, Math.min(clip.frameCount, cf - activeOffset)))
       const atKey = findKeyframeAt(clip, selectedBone, frame)
       let q: Quat
       if (atKey) {
@@ -478,7 +487,7 @@ export const PropertiesInspector = memo(function PropertiesInspector({
         atKey.rotation = q
       } else {
         // Need pose to create the new keyframe — seek first.
-        model.loadClip(STUDIO_ANIM_NAME, clip)
+        model.loadClip(STUDIO_ANIM_NAME, toEngineClip(clip))
         model.seek(Math.max(0, cf) / 30)
         const pose = readLocalPoseAfterSeek(model, selectedBone)
         if (!pose) return
@@ -498,7 +507,7 @@ export const PropertiesInspector = memo(function PropertiesInspector({
         track.sort((a, b) => a.frame - b.frame)
       }
       // Push to engine for viewport update.
-      model.loadClip(STUDIO_ANIM_NAME, clip)
+      model.loadClip(STUDIO_ANIM_NAME, toEngineClip(clip))
       model.seek(Math.max(0, cf) / 30)
       if (mode === "preview") {
         dragDirtyRef.current = true
@@ -508,7 +517,7 @@ export const PropertiesInspector = memo(function PropertiesInspector({
         dragDirtyRef.current = false
       }
     },
-    [selectedBone, clip, commit, playbackFrameRef, modelRef],
+    [selectedBone, clip, commit, playbackFrameRef, modelRef, toEngineClip, activeOffset],
   )
 
   const applyTranslationAxis = useCallback(
@@ -516,14 +525,14 @@ export const PropertiesInspector = memo(function PropertiesInspector({
       const model = modelRef.current
       if (!selectedBone || !clip || !model) return
       const cf = playbackFrameRef.current
-      const frame = Math.round(Math.max(0, Math.min(clip.frameCount, cf)))
+      const frame = Math.round(Math.max(0, Math.min(clip.frameCount, cf - activeOffset)))
       const atKey = findKeyframeAt(clip, selectedBone, frame)
       if (atKey) {
         const t = atKey.translation
         atKey.translation =
           axisIdx === 0 ? new Vec3(v, t.y, t.z) : axisIdx === 1 ? new Vec3(t.x, v, t.z) : new Vec3(t.x, t.y, v)
       } else {
-        model.loadClip(STUDIO_ANIM_NAME, clip)
+        model.loadClip(STUDIO_ANIM_NAME, toEngineClip(clip))
         model.seek(Math.max(0, cf) / 30)
         const pose = readLocalPoseAfterSeek(model, selectedBone)
         if (!pose) return
@@ -541,7 +550,7 @@ export const PropertiesInspector = memo(function PropertiesInspector({
         })
         track.sort((a, b) => a.frame - b.frame)
       }
-      model.loadClip(STUDIO_ANIM_NAME, clip)
+      model.loadClip(STUDIO_ANIM_NAME, toEngineClip(clip))
       model.seek(Math.max(0, cf) / 30)
       if (mode === "preview") {
         dragDirtyRef.current = true
@@ -550,13 +559,13 @@ export const PropertiesInspector = memo(function PropertiesInspector({
         dragDirtyRef.current = false
       }
     },
-    [selectedBone, clip, commit, playbackFrameRef, modelRef],
+    [selectedBone, clip, commit, playbackFrameRef, modelRef, toEngineClip, activeOffset],
   )
 
   const applyMorphWeight = useCallback(
     (w: number, mode: "preview" | "commit") => {
       if (!selectedMorph || !clip) return
-      const frame = Math.round(Math.max(0, Math.min(clip.frameCount, playbackFrameRef.current)))
+      const frame = Math.round(Math.max(0, Math.min(clip.frameCount, playbackFrameRef.current - activeOffset)))
       // Installing a MISSING track has to go through commit, not through the
       // live clip's Map. Adding it here mutated the object the store is holding
       // while `mode === "preview"` deliberately does not commit, so `clip` and
@@ -584,7 +593,7 @@ export const PropertiesInspector = memo(function PropertiesInspector({
       }
       const model = modelRef.current
       if (model) {
-        model.loadClip(STUDIO_ANIM_NAME, clip)
+        model.loadClip(STUDIO_ANIM_NAME, toEngineClip(clip))
         model.seek(Math.max(0, playbackFrameRef.current) / 30)
       }
       syncTimelineTabForMorphDrag(timelineTab, setTimelineTab)
@@ -595,7 +604,7 @@ export const PropertiesInspector = memo(function PropertiesInspector({
         dragDirtyRef.current = false
       }
     },
-    [selectedMorph, clip, commit, timelineTab, setTimelineTab, playbackFrameRef, modelRef],
+    [selectedMorph, clip, commit, timelineTab, setTimelineTab, playbackFrameRef, modelRef, toEngineClip, activeOffset],
   )
 
   // The camera owns the whole pane when selected — it is not a bone with extra
@@ -603,7 +612,7 @@ export const PropertiesInspector = memo(function PropertiesInspector({
   // apply to it.
   if (cameraSelected) {
     return (
-      <div className="space-y-0 text-[11px] leading-relaxed text-inherit">
+      <div className="space-y-0 text-[12px] leading-relaxed text-inherit">
         <CameraSection
           cameraTrack={cameraTrack}
           commitCamera={commitCamera}
@@ -621,7 +630,7 @@ export const PropertiesInspector = memo(function PropertiesInspector({
   }
 
   return (
-    <div className="space-y-0 text-[11px] leading-relaxed text-inherit">
+    <div className="space-y-0 text-[12px] leading-relaxed text-inherit">
 
       {/* ─── Bone: sliders always; clip write updates key at playhead or inserts one ─── */}
       {showBoneStats && selectedBone ? (
@@ -633,7 +642,7 @@ export const PropertiesInspector = memo(function PropertiesInspector({
                 return (
                   <>
                     <div className="text-xs font-semibold text-inherit">{title}</div>
-                    {subtitle ? <div className="text-[10px] text-muted-foreground">{subtitle}</div> : null}
+                    {subtitle ? <div className="text-[11px] text-muted-foreground">{subtitle}</div> : null}
                   </>
                 )
               })()}
@@ -650,6 +659,7 @@ export const PropertiesInspector = memo(function PropertiesInspector({
             applyRotationAxis={applyRotationAxis}
             applyTranslationAxis={applyTranslationAxis}
             traRange={TRA_RANGE}
+            offset={activeOffset}
           />
 
           <InterpolationSection
@@ -657,6 +667,7 @@ export const PropertiesInspector = memo(function PropertiesInspector({
             selectedBone={selectedBone}
             commit={commit}
             clipVersion={clipVersion}
+            offset={activeOffset}
           />
         </section>
       ) : null}
@@ -669,22 +680,23 @@ export const PropertiesInspector = memo(function PropertiesInspector({
             </div>
             <PlayheadFrameLabel frameCount={clip?.frameCount ?? null} />
           </div>
-          <div className="mb-2 text-[10px] font-medium uppercase tracking-[0.06em] text-muted-foreground">{t.inspector.weight}</div>
+          <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.06em] text-muted-foreground">{t.inspector.weight}</div>
           <LiveMorphSlider
             modelRef={modelRef}
             selectedMorph={selectedMorph}
             clip={clip}
             disabled={!clip}
+            offset={activeOffset}
             applyMorphWeight={applyMorphWeight}
           />
         </section>
       ) : null}
 
       <section className="space-y-2 pt-2.5">
-        <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">{t.inspector.operations}</div>
+        <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">{t.inspector.operations}</div>
         <div className="space-y-2.5">
           <div className="flex items-center gap-1.5">
-            <span className="w-10 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">{t.inspector.groupKey}</span>
+            <span className="w-10 shrink-0 text-[11px] uppercase tracking-wider text-muted-foreground">{t.inspector.groupKey}</span>
             <Button type="button" variant="ghost" size="xs" className={opRow} disabled={!canInsert} onClick={onInsertKeyframeAtPlayhead}>
               {t.inspector.insert}
             </Button>
@@ -693,7 +705,7 @@ export const PropertiesInspector = memo(function PropertiesInspector({
             </Button>
           </div>
           <div className="flex items-center gap-1.5">
-            <span className="w-10 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">{t.inspector.groupSel}</span>
+            <span className="w-10 shrink-0 text-[11px] uppercase tracking-wider text-muted-foreground">{t.inspector.groupSel}</span>
             <Button type="button" variant="ghost" size="xs" className={opRow} disabled={!canCopy} onClick={onCopySelectedKeyframes}>
               {t.inspector.copy}
             </Button>
@@ -705,7 +717,7 @@ export const PropertiesInspector = memo(function PropertiesInspector({
             </Button>
           </div>
           <div className="flex items-center gap-1.5">
-            <span className="w-10 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">{t.inspector.groupTrack}</span>
+            <span className="w-10 shrink-0 text-[11px] uppercase tracking-wider text-muted-foreground">{t.inspector.groupTrack}</span>
             <Button
               type="button"
               variant="ghost"
@@ -738,7 +750,7 @@ export const PropertiesInspector = memo(function PropertiesInspector({
               rather than the action: a "Hide" that becomes "Show" reads as a
               command and leaves you guessing which word describes right now. */}
           <div className="flex items-center gap-1.5">
-            <span className="w-10 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">{t.inspector.groupGizmo}</span>
+            <span className="w-10 shrink-0 text-[11px] uppercase tracking-wider text-muted-foreground">{t.inspector.groupGizmo}</span>
             <Button
               type="button"
               variant="ghost"
@@ -748,7 +760,7 @@ export const PropertiesInspector = memo(function PropertiesInspector({
               onClick={() => setGizmoVisible((v) => !v)}
               title={gizmoVisible ? t.inspector.gizmoHide : t.inspector.gizmoShow}
               className={cn(
-                "h-6 flex-1 border px-0.5 text-[11px]",
+                "h-6 flex-1 border px-0.5 text-[12px]",
                 gizmoVisible
                   ? "border-blue-400/30 bg-blue-400/[0.12] text-blue-400 hover:bg-blue-400/20 hover:text-blue-400"
                   : "border-line-strong bg-surface-raised text-muted-foreground hover:text-foreground",
@@ -776,6 +788,7 @@ function LiveBoneSliders({
   applyRotationAxis,
   applyTranslationAxis,
   traRange,
+  offset,
 }: {
   modelRef: RefObject<Model | null>
   selectedBone: string | null
@@ -785,12 +798,13 @@ function LiveBoneSliders({
   applyRotationAxis: (axisIdx: 0 | 1 | 2, v: number, mode: "preview" | "commit") => void
   applyTranslationAxis: (axisIdx: 0 | 1 | 2, v: number, mode: "preview" | "commit") => void
   traRange: { min: number; max: number }
+  offset: number
 }) {
   const t = useT()
-  const livePose = useLivePose(modelRef, selectedBone, clip)
+  const livePose = useLivePose(modelRef, selectedBone, clip, offset)
   return (
     <>
-      <div className="mb-2 text-[10px] font-medium uppercase tracking-[0.06em] text-muted-foreground">{t.inspector.rotationDeg}</div>
+      <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.06em] text-muted-foreground">{t.inspector.rotationDeg}</div>
       {livePose ? (
         ROT_CHANNELS.map((ch, i) => (
           <AxisSliderRow
@@ -810,10 +824,10 @@ function LiveBoneSliders({
           />
         ))
       ) : (
-        <div className="text-[11px] text-muted-foreground">{t.inspector.none}</div>
+        <div className="text-[12px] text-muted-foreground">{t.inspector.none}</div>
       )}
 
-      <div className="mb-2 mt-3 text-[10px] font-medium uppercase tracking-[0.06em] text-muted-foreground">
+      <div className="mb-2 mt-3 text-[11px] font-medium uppercase tracking-[0.06em] text-muted-foreground">
         {t.inspector.translation}
       </div>
       {livePose ? (
@@ -835,7 +849,7 @@ function LiveBoneSliders({
           />
         ))
       ) : (
-        <div className="text-[11px] text-muted-foreground">{t.inspector.none}</div>
+        <div className="text-[12px] text-muted-foreground">{t.inspector.none}</div>
       )}
     </>
   )
@@ -848,15 +862,17 @@ function LiveMorphSlider({
   selectedMorph,
   clip,
   disabled,
+  offset,
   applyMorphWeight,
 }: {
   modelRef: RefObject<Model | null>
   selectedMorph: string | null
   clip: AnimationClip | null
   disabled: boolean
+  offset: number
   applyMorphWeight: (w: number, mode: "preview" | "commit") => void
 }) {
-  const weight = useLiveMorphWeight(modelRef, selectedMorph, clip)
+  const weight = useLiveMorphWeight(modelRef, selectedMorph, clip, offset)
   return (
     <AxisSliderRow
       axis="W"
@@ -907,7 +923,7 @@ function PlayheadFrameLabel({ frameCount }: { frameCount: number | null }) {
   }, [playing, frameRef])
 
   return (
-    <div className="shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground">
+    <div className="shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground">
       F <span ref={nodeRef}>{Math.round(currentFrame)}</span>
       {frameCount != null ? ` / ${frameCount}` : ""}
     </div>
@@ -922,11 +938,13 @@ function InterpolationSection({
   selectedBone,
   commit,
   clipVersion,
+  offset,
 }: {
   clip: AnimationClip | null
   selectedBone: string | null
   commit: ReturnType<typeof useStudioActions>["commit"]
   clipVersion: number
+  offset: number
 }) {
   const [ipTab, setIpTab] = useState<IpTab>("rot")
 
@@ -941,7 +959,7 @@ function InterpolationSection({
   // Live during playback: tracks the keyframe currently under the playhead
   // (last key with frame ≤ f). Reconciles only when the active key flips, not
   // every rAF tick — see `useLiveActiveKeyframe`.
-  const kfSample = useLiveActiveKeyframe(clip, selectedBone)
+  const kfSample = useLiveActiveKeyframe(clip, selectedBone, offset)
   // A curve belongs to a keyframe, so editing one only means something when the
   // playhead is ON a key. `kfSample` is the last key at OR BEFORE the playhead
   // — right for reading a live value, wrong for editing: parked between two
@@ -949,7 +967,7 @@ function InterpolationSection({
   // nothing, so the change landed somewhere you were not looking.
   const currentFrame = usePlaybackSelector((st) => st.currentFrame)
   const kfAtPlayhead =
-    kfSample && kfSample.frame === Math.round(Math.max(0, currentFrame)) ? kfSample : null
+    kfSample && kfSample.frame === Math.round(Math.max(0, currentFrame - offset)) ? kfSample : null
   const canEditIp = !!(clip && selectedBone && kfAtPlayhead)
 
   // No useMemo: `patchKeyframeAt` mutates the keyframe in place and returns a
@@ -1015,7 +1033,7 @@ function InterpolationPanel({
   const t = useT()
   return (
     <>
-      <div className="mb-2 mt-3 text-[10px] font-medium uppercase tracking-[0.06em] text-muted-foreground">
+      <div className="mb-2 mt-3 text-[11px] font-medium uppercase tracking-[0.06em] text-muted-foreground">
         {t.inspector.interpolation}
       </div>
       <div className="mb-1.5 flex flex-wrap items-center gap-0.5">
@@ -1031,7 +1049,7 @@ function InterpolationPanel({
               disabled={disabled}
               onClick={() => onTabChange(tabDef.key)}
               className={cn(
-                "h-5 shrink-0 rounded-md px-1 font-mono text-[9px] transition-none",
+                "h-5 shrink-0 rounded-md px-1 font-mono text-[10px] transition-none",
                 active
                   ? tabDef.color
                     ? "text-[#0f0f12] hover:opacity-90 dark:hover:bg-transparent"
@@ -1075,7 +1093,7 @@ function InterpolationPanel({
                 // the one that eventually does not fit.
                 title={pr.label}
                 className={cn(
-                  "h-5 min-h-0 w-full truncate px-1 text-center text-[9.5px] font-medium leading-tight",
+                  "h-5 min-h-0 w-full truncate px-1 text-center text-[10.5px] font-medium leading-tight",
                   active
                     ? "border-primary/30 text-primary"
                     : "text-muted-foreground hover:border-primary/25 hover:text-accent-foreground",
@@ -1201,7 +1219,7 @@ const CameraSection = memo(function CameraSection({
 }) {
   const t = useT()
   const opRow =
-    "h-6 flex-1 rounded-chip border border-line-strong bg-surface-raised px-0.5 text-[10px] text-muted-foreground hover:text-foreground"
+    "h-6 flex-1 rounded-chip border border-line-strong bg-surface-raised px-0.5 text-[11px] text-muted-foreground hover:text-foreground"
   const destructiveOpRow = cn(opRow, "text-red-400 hover:bg-red-400/10 hover:text-red-400")
   const playhead = usePlaybackSelector((st) => st.currentFrame)
   const frame = Math.round(Math.max(0, playhead))
@@ -1317,7 +1335,7 @@ const CameraSection = memo(function CameraSection({
         <div className="mb-2 flex items-start justify-between gap-2">
           <div>
             <div className="text-xs font-semibold text-inherit">{t.camera.title}</div>
-            <div className="text-[10px] text-muted-foreground">
+            <div className="text-[11px] text-muted-foreground">
               {cameraTrack.length === 0
                 ? t.camera.noKeys
                 : keyAtPlayhead
@@ -1338,7 +1356,7 @@ const CameraSection = memo(function CameraSection({
             )}
           >
             {group.labelKey ? (
-              <div className="mb-1 text-[10px] font-medium uppercase tracking-[0.06em] text-muted-foreground">
+              <div className="mb-1 text-[11px] font-medium uppercase tracking-[0.06em] text-muted-foreground">
                 {t.camera[group.labelKey]}
               </div>
             ) : null}
@@ -1376,10 +1394,10 @@ const CameraSection = memo(function CameraSection({
       />
 
       <section className="space-y-2 pt-2.5">
-        <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">{t.inspector.operations}</div>
+        <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">{t.inspector.operations}</div>
         <div className="space-y-2.5">
           <div className="flex items-center gap-1.5">
-            <span className="w-10 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">{t.inspector.groupKey}</span>
+            <span className="w-10 shrink-0 text-[11px] uppercase tracking-wider text-muted-foreground">{t.inspector.groupKey}</span>
             <Button
               type="button"
               variant="ghost"
@@ -1404,7 +1422,7 @@ const CameraSection = memo(function CameraSection({
             </Button>
           </div>
           <div className="flex items-center gap-1.5">
-            <span className="w-10 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">{t.inspector.groupSel}</span>
+            <span className="w-10 shrink-0 text-[11px] uppercase tracking-wider text-muted-foreground">{t.inspector.groupSel}</span>
             <Button type="button" variant="ghost" size="xs" className={opRow} disabled={!canCopy} onClick={onCopySelectedKeyframes}>
               {t.inspector.copy}
             </Button>
@@ -1416,7 +1434,7 @@ const CameraSection = memo(function CameraSection({
             </Button>
           </div>
           <div className="flex items-center gap-1.5">
-            <span className="w-10 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">{t.inspector.groupTrack}</span>
+            <span className="w-10 shrink-0 text-[11px] uppercase tracking-wider text-muted-foreground">{t.inspector.groupTrack}</span>
             {/* Permanently disabled, and kept anyway: Simplify fits a curve
                 through dense keys, and a camera VMD is sparse by nature — its
                 keys ARE the cuts, so there is nothing to reduce. Dropping the

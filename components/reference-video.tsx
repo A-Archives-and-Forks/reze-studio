@@ -294,7 +294,7 @@ export function ReferenceVideo({ src, name, onClose }: { src: string; name: stri
         style={{ height: HEADER_H }}
       >
         <Film className="size-3.5 shrink-0 text-muted-foreground" strokeWidth={1.75} />
-        <span className="min-w-0 truncate font-mono text-[9px] text-muted-foreground" title={name}>
+        <span className="min-w-0 truncate font-mono text-[10px] text-muted-foreground" title={name}>
           {name}
         </span>
         <div className="ml-auto flex shrink-0 items-center gap-0.5">
@@ -339,7 +339,7 @@ export function ReferenceVideo({ src, name, onClose }: { src: string; name: stri
       />
 
       <footer
-        className="flex shrink-0 items-center gap-1.5 border-t border-line px-2 font-mono text-[9px] tabular-nums text-muted-foreground"
+        className="flex shrink-0 items-center gap-1.5 border-t border-line px-2 font-mono text-[10px] tabular-nums text-muted-foreground"
         style={{ height: FOOTER_H }}
       >
         <span ref={timeRef} className="shrink-0">
@@ -376,7 +376,7 @@ export function ReferenceVideo({ src, name, onClose }: { src: string; name: stri
               if (e.key === "Enter") (e.target as HTMLInputElement).blur()
             }}
             className={cn(
-              "h-4 w-8 min-w-0 rounded border border-transparent bg-transparent px-0.5 text-right text-[9px] tabular-nums outline-none",
+              "h-4 w-8 min-w-0 rounded border border-transparent bg-transparent px-0.5 text-right text-[10px] tabular-nums outline-none",
               "focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring/30",
             )}
           />

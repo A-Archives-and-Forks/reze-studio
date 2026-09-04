@@ -11,6 +11,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   type Dispatch,
   type RefObject,
@@ -24,6 +25,8 @@ import { useStudioStatusActions } from "@/components/studio-status"
 import { autoClassifyMaterials } from "@/lib/materials"
 import { clipRetainedForModel, emptyStudioClip, interpolationTemplateForFrame, readLocalPoseAfterSeek } from "@/lib/utils"
 import { loadDraft, type StoredTimelineView } from "@/lib/draft"
+import { useEngineClip } from "@/lib/engine-sync"
+import { useActiveOffset } from "@/components/arrange-view"
 import { clearModelUpload, loadModelUpload } from "@/lib/model-store"
 
 // ─── Constants shared with StudioPage file handlers ──────────────────────
@@ -133,6 +136,10 @@ export function EngineBridge({
   onFreshBoot,
 }: EngineBridgeProps) {
   const clip = useStudioSelector((s) => s.clip)
+  const toEngineClip = useEngineClip()
+  const activeOffset = useActiveOffset()
+  const activeOffsetRef = useRef(activeOffset)
+  activeOffsetRef.current = activeOffset
   const selectedBone = useStudioSelector((s) => s.selectedBone)
   const selectedMaterial = useStudioSelector((s) => s.selectedMaterial)
   const gizmoVisible = useStudioSelector((s) => s.gizmoVisible)
@@ -163,8 +170,22 @@ export function EngineBridge({
   // reads this. Without the camera's length in here the playhead stops dead
   // partway through the shot, which also means it never leaves the visible
   // window and the timeline never page-turns.
+  // An empty document is a document. Handing the engine nothing left it
+  // playing whatever it last had, so an emptied library kept dancing.
+  const engineClip = useMemo(() => toEngineClip(clip ?? emptyStudioClip()), [clip, toEngineClip])
+  /**
+   * The bones the last upload drove.
+   *
+   * Nothing in the engine's pose pass resets a bone: it writes the bones its
+   * clip names and leaves every other one where it was. So a bone that drops
+   * OUT of the clip — a deleted placement, a muted lane, a cleared track —
+   * holds its final pose for the rest of the session, and the timeline says one
+   * thing while the model does another. Morphs are handled inside the engine
+   * (see retiredMorphs); bones are ours.
+   */
+  const loadedBonesRef = useRef<ReadonlySet<string>>(new Set())
   const lastCameraFrame = cameraTrack.length > 0 ? cameraTrack[cameraTrack.length - 1].frame : 0
-  const frameCount = Math.max(clip?.frameCount ?? 0, lastCameraFrame)
+  const frameCount = Math.max(engineClip?.frameCount ?? clip?.frameCount ?? 0, lastCameraFrame)
 
   // ─── Refs for the engine-supplied callbacks ──────────────────────────
   //     The Engine constructor takes `onRaycast` / `onGizmoDrag` once at
@@ -177,6 +198,10 @@ export function EngineBridge({
     clipRef.current = clip
   }, [clip])
   const dragDirtyRef = useRef(false)
+  // The gizmo handler is registered with the Engine once and never re-created,
+  // so it reaches the mapper through a ref rather than closing over it.
+  const toEngineClipRef = useRef(toEngineClip)
+  toEngineClipRef.current = toEngineClip
 
   const playRef = useRef(false)
   const lastFpsRef = useRef<number | null>(null)
@@ -275,7 +300,8 @@ export function EngineBridge({
         return
       }
 
-      const frame = Math.round(Math.max(0, Math.min(clip.frameCount, playbackFrameRef.current)))
+      // The gizmo writes a keyframe, so the playhead has to arrive as one.
+      const frame = Math.round(Math.max(0, Math.min(clip.frameCount, playbackFrameRef.current - activeOffsetRef.current)))
       const bone = e.boneName
       const track = clip.boneTracks.get(bone) ?? []
       const atKey = track.find((k) => k.frame === frame)
@@ -287,7 +313,7 @@ export function EngineBridge({
         // No key at this frame yet — pull the untouched channel from the
         // interpolated pose so the new key preserves whatever's currently
         // displayed on the channel the user isn't dragging.
-        model.loadClip(STUDIO_ANIM_NAME, clip)
+        model.loadClip(STUDIO_ANIM_NAME, toEngineClipRef.current(clip))
         model.seek(frame / 30)
         const pose = readLocalPoseAfterSeek(model, bone)
         if (!pose) return
@@ -304,7 +330,7 @@ export function EngineBridge({
         track.sort((a, b) => a.frame - b.frame)
       }
 
-      model.loadClip(STUDIO_ANIM_NAME, clip)
+      model.loadClip(STUDIO_ANIM_NAME, toEngineClipRef.current(clip))
       model.seek(frame / 30)
 
       if (e.phase === "end") {
@@ -474,11 +500,14 @@ export function EngineBridge({
               ...e,
               clip: clipRetainedForModel(e.clip, boneSet, morphSet),
             }))
-            restoreLibrary(restored, draft.activeClipId)
-            const clip = (restored.find((e) => e.id === draft.activeClipId) ?? restored[0]).clip
-            model.loadClip(STUDIO_ANIM_NAME, clip)
+            restoreLibrary(restored, draft.tracks, draft.activeClipId)
+            // A restored project may hold no clips at all — every one deleted
+            // before the tab closed. There is nothing to load in that case, and
+            // the empty clip the upload effect sends is the right answer.
+            const active = restored.find((e) => e.id === draft.activeClipId) ?? restored[0] ?? null
+            if (active) model.loadClip(STUDIO_ANIM_NAME, active.clip)
             model.show(STUDIO_ANIM_NAME)
-            const restoredFrame = Math.min(Math.max(0, draft.currentFrame ?? 0), Math.max(0, clip.frameCount))
+            const restoredFrame = Math.min(Math.max(0, draft.currentFrame ?? 0), Math.max(0, active?.clip.frameCount ?? 0))
             model.seek(restoredFrame / 30)
             setCurrentFrame(restoredFrame)
             lastSeekFrameRef.current = restoredFrame
@@ -609,12 +638,25 @@ export function EngineBridge({
   //     pause doesn't snap the viewport back to frame 0. ────────────────
   useEffect(() => {
     const model = modelRef.current
-    if (!model || !clip) return
-    model.loadClip(STUDIO_ANIM_NAME, clip)
+    if (!model || !engineClip) return
+    const next = new Set(engineClip.boneTracks.keys())
+    let dropped = false
+    for (const name of loadedBonesRef.current) {
+      if (!next.has(name)) {
+        dropped = true
+        break
+      }
+    }
+    loadedBonesRef.current = next
+    // Back to the bind pose first, so only what the new clip names is posed.
+    // The clip is applied on the very next pose pass, so this is not a flash of
+    // T-pose — it is the floor the pass writes onto.
+    if (dropped) model.resetAllBones()
+    model.loadClip(STUDIO_ANIM_NAME, engineClip)
     const f = Math.max(0, currentFrameRef.current)
     model.seek(f / 30)
     maybeResetPhysicsAfterSeek(f)
-  }, [clip, currentFrameRef, modelRef, maybeResetPhysicsAfterSeek])
+  }, [engineClip, currentFrameRef, modelRef, maybeResetPhysicsAfterSeek])
 
   // ─── Scrub: when paused, React owns the playhead and pushes seeks into
   //     the engine. When playing, the engine owns the playhead; the rAF

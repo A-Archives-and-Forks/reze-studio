@@ -10,11 +10,27 @@ import {
   forwardRef,
   type ChangeEvent,
   type InputHTMLAttributes,
+  type ComponentType,
   type RefObject,
 } from "react"
 import Link from "next/link"
 import Image from "next/image"
-import { FilePlus2, FolderOpen, FileMusic, FileDown, RotateCcw, Check, Video, Orbit, Eraser, Music, Film } from "lucide-react"
+import {
+  Bone,
+  Check,
+  Clapperboard,
+  Eraser,
+  FileDown,
+  FileMusic,
+  FilePlus2,
+  Film,
+  FolderOpen,
+  Music,
+  Orbit,
+  RotateCcw,
+  Smile,
+  Video,
+} from "lucide-react"
 import { Engine, Model, Vec3, VMDLoader, VMDWriter, parsePmxFolderInput, pmxFileAtRelativePath } from "reze-engine"
 import { Button } from "@/components/ui/button"
 import {
@@ -30,6 +46,14 @@ import { BoneList } from "@/components/bone-list"
 import { MorphList } from "@/components/morph-list"
 import { PanelStack, type PanelStackSection } from "@/components/panel-stack"
 import { ClipLibrary } from "@/components/clip-library"
+import {
+  useActiveOffset,
+  useCopySelectedPlacements,
+  useCutSelectedPlacements,
+  usePastePlacements,
+  useRemoveSelectedPlacements,
+} from "@/components/arrange-view"
+import { useEngineClip } from "@/lib/engine-sync"
 import { MaterialList } from "@/components/material-list"
 import { PropertiesInspector } from "@/components/properties-inspector"
 import { Timeline } from "@/components/timeline"
@@ -55,7 +79,7 @@ import {
   fileStem,
   sanitizeClipFilenameBase,
 } from "@/components/engine-bridge"
-import { StudioStatusFooter, useStudioStatusActions } from "@/components/studio-status"
+import { StudioStatusOverlay, useStudioStatusActions } from "@/components/studio-status"
 import {
   clipRetainedForModel,
   cloneBoneInterpolation,
@@ -85,6 +109,7 @@ const DOCS_README_URL = `${REPO_URL}/blob/main/README.md`
 /** Where an imported VMD is parsed before it reaches the library — never the
  *  clip the editor is showing, so importing cannot disturb an edit in flight. */
 const IMPORT_SCRATCH_ANIM_NAME = "studio-import"
+const TIMELINE_MODE_KEY = storageKey("timelineMode")
 const BONE_OVERLAY_KEY = storageKey("boneOverlay")
 
 // Module-level, deliberately: the clipboard outlives whichever panel copied
@@ -142,6 +167,73 @@ function downloadBlob(blob: Blob, filename: string) {
   URL.revokeObjectURL(url)
 }
 
+
+// ─── Menu building blocks ────────────────────────────────────────────────
+// Every item in every menu carried the same eight class names inline, which is
+// how three menus end up with four paddings. One shape each for the three
+// kinds of row there actually are: something that happens, something that is
+// on or off, and somewhere to go.
+
+const MENU_ITEM = "gap-2 py-1 pl-2 pr-1.5 text-[12px] text-muted-foreground"
+
+function MenuAction({
+  icon: Icon,
+  label,
+  onSelect,
+  disabled,
+}: {
+  icon?: ComponentType<{ className?: string }>
+  label: string
+  onSelect: () => void
+  disabled?: boolean
+}) {
+  return (
+    <MenubarItem className={MENU_ITEM} disabled={disabled} onSelect={onSelect}>
+      {Icon ? <Icon className="size-3.5" /> : null}
+      {label}
+    </MenubarItem>
+  )
+}
+
+/** A setting, with the check on the right. Never disappears when off — the
+ *  space is held, so the list does not reflow as things are switched. */
+function MenuToggle({
+  label,
+  on,
+  onSelect,
+  disabled,
+}: {
+  label: string
+  on: boolean
+  onSelect: () => void
+  disabled?: boolean
+}) {
+  return (
+    <MenubarItem className={cn(MENU_ITEM, "justify-between")} disabled={disabled} onSelect={onSelect}>
+      <span>{label}</span>
+      {on ? <Check className="size-3 shrink-0 text-blue-400" /> : <span className="size-3 shrink-0" />}
+    </MenubarItem>
+  )
+}
+
+/** Names the thing a group of rows acts on. Not a MenubarItem — it is not a
+ *  target, and making it focusable would put a stop on every group. */
+function MenuSectionLabel({ label }: { label: string }) {
+  return (
+    <div className="px-2 pb-0.5 pt-1 text-[11px] uppercase tracking-[0.08em] text-muted-foreground">{label}</div>
+  )
+}
+
+function MenuLink({ href, label }: { href: string; label: string }) {
+  return (
+    <MenubarItem className={MENU_ITEM} asChild>
+      <Link href={href} target="_blank" rel="noreferrer">
+        {label}
+      </Link>
+    </MenubarItem>
+  )
+}
+
 /** Canvas + error overlay — playhead updates won’t reconcile this subtree. */
 type StudioViewportProps = {
   engineError: string | null
@@ -150,11 +242,14 @@ type StudioViewportProps = {
   hasCameraTrack: boolean
   cameraVmdEnabled: boolean
   onToggleCameraVmd: () => void
+  /** Passed through to the overlay, which flags an IK that is switched off —
+   *  the one setting whose non-default state is invisible in the viewport. */
+  ikEnabled: boolean
 }
 
 const StudioViewport = memo(
   forwardRef<HTMLCanvasElement, StudioViewportProps>(function StudioViewport(
-    { engineError, hasCameraTrack, cameraVmdEnabled, onToggleCameraVmd },
+    { engineError, hasCameraTrack, cameraVmdEnabled, onToggleCameraVmd, ikEnabled },
     ref,
   ) {
     const t = useT()
@@ -184,6 +279,7 @@ const StudioViewport = memo(
             {cameraVmdEnabled ? <Video className="size-4" /> : <Orbit className="size-4" />}
           </Button>
         ) : null}
+        <StudioStatusOverlay ikEnabled={ikEnabled} />
         {engineError ? (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-background/70 p-4 text-center text-sm text-muted-foreground">
             {engineError}
@@ -214,6 +310,7 @@ type StudioLeftPanelProps = {
   onActivateClip: (id: ClipId) => void
   onRemoveClip: (id: ClipId) => void
   onImportClip: () => void
+  onDragClipToArrangement: () => void
   importVmdInputRef: RefObject<HTMLInputElement | null>
   onPickImportVmdFile: (e: ChangeEvent<HTMLInputElement>) => void
   modelBones: string[]
@@ -275,6 +372,7 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
   onActivateClip,
   onRemoveClip,
   onImportClip,
+  onDragClipToArrangement,
   importVmdInputRef,
   onPickImportVmdFile,
   modelBones,
@@ -327,8 +425,11 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
       {
         id: "clips",
         label: t.panel.clips,
+        icon: Clapperboard,
         count: library.length,
-        defaultWeight: 30,
+        // Fixed to its contents rather than resizable, up to about seven rows;
+        // past that it scrolls instead of taking the column.
+        fitMaxHeight: 192,
         title: t.panel.clipsTitle,
         body: (
           <ClipLibrary
@@ -337,12 +438,14 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
             onActivate={onActivateClip}
             onRemove={onRemoveClip}
             onImport={onImportClip}
+            onDragStart={onDragClipToArrangement}
           />
         ),
       },
       {
         id: "bones",
         label: t.panel.bones,
+        icon: Bone,
         count: modelBones.length,
         defaultWeight: 72,
         title: t.panel.bonesTitle,
@@ -361,6 +464,7 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
       {
         id: "morphs",
         label: t.panel.morphs,
+        icon: Smile,
         count: morphNames.length,
         defaultWeight: 28,
         title: t.panel.morphsTitle,
@@ -381,6 +485,7 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
       onActivateClip,
       onRemoveClip,
       onImportClip,
+      onDragClipToArrangement,
       modelBones,
       clip,
       selectedGroup,
@@ -397,9 +502,14 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
     <aside className={cn("flex w-56 shrink-0 flex-col overflow-hidden rounded-surface border border-line-strong bg-surface", hidden && "hidden")}>
       <div className="shrink-0 border-b border-line">
         <div className="pl-2 pt-0 flex items-center justify-between pb-1">
-        <h2 className="scroll-m-20 text-sm font-semibold tracking-tight first:mt-0">
-          REZE STUDIO
-        </h2>
+        <div className="flex min-w-0 items-center gap-1.5">
+          <h2 className="scroll-m-20 text-sm font-semibold tracking-tight first:mt-0">REZE STUDIO</h2>
+          {/* Mono: it is a version, and digits that share a column read as one
+              number rather than as text that happens to contain digits. */}
+          <span className="shrink-0 rounded-full bg-blue-400/15 px-1.5 py-0.5 font-mono text-[10px] font-medium leading-none text-blue-400">
+            v{appVersion}
+          </span>
+        </div>
           <div className="flex shrink-0 items-center gap-0.5">
             <Button variant="ghost" size="sm" asChild className="hover:bg-black hover:text-white rounded-full">
               <Link href="https://github.com/AmyangXYZ/reze-studio" target="_blank">
@@ -478,195 +588,128 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
             onValueChange={onMenubarValueChange}
             className="h-4 gap-0 rounded-none border-0 bg-transparent p-0 shadow-none"
           >
+            {/* Grouped by WHAT each action acts on, not by what it does.
+                A motion, a set of expressions, a shot and a song each arrive,
+                leave and get thrown away the same way, and the question anyone
+                opens this menu with is "the camera — how do I replace it",
+                never "what else can be imported". */}
             <MenubarMenu value="file">
               <MenubarTrigger className="h-4 rounded-sm px-1.5 py-0 text-xs font-normal text-muted-foreground">
                 {t.menu.file}
               </MenubarTrigger>
-              <MenubarContent sideOffset={4} className="min-w-32 p-0.5 text-xs">
+              <MenubarContent sideOffset={4} className="min-w-40 p-0.5 text-xs">
                 <MenubarGroup>
-                  <MenubarItem
-                    className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
+                  <MenuAction
+                    icon={FilePlus2}
+                    label={t.menu.newProject}
                     disabled={!studioReady}
                     onSelect={resetStudioDocument}
-                  >
-                    <FilePlus2 className="size-3.5" />
-                    {t.menu.newProject}
-                  </MenubarItem>
-                  <MenubarItem
-                    className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
+                  />
+                  <MenuAction
+                    icon={RotateCcw}
+                    label={t.menu.resetProject}
                     disabled={!studioReady}
                     onSelect={resetToDefaultModel}
-                  >
-                    <RotateCcw className="size-3.5" />
-                    {t.menu.resetProject}
-                  </MenubarItem>
-                  <MenubarSeparator className="my-0.5" />
-                  <MenubarItem
-                    className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
-                    onSelect={(e) => {
-                      e.preventDefault()
-                      pmxFolderInputRef.current?.click()
-                    }}
-                  >
-                    <FolderOpen className="size-3.5" />
-                    {t.menu.loadPmx}
-                  </MenubarItem>
-                  <MenubarItem
-                    className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
-                    disabled={!studioReady}
-                    onSelect={() => vmdInputRef.current?.click()}
-                  >
-                    <FileMusic className="size-3.5" />
-                    {t.menu.loadVmd}
-                  </MenubarItem>
-                  <MenubarItem
-                    className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
-                    disabled={!studioReady}
-                    onSelect={onImportClip}
-                  >
-                    <FilePlus2 className="size-3.5" />
-                    {t.menu.importVmd}
-                  </MenubarItem>
-                  <MenubarItem
-                    className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
-                    disabled={!studioReady}
-                    onSelect={() => morphVmdInputRef.current?.click()}
-                  >
-                    <FileMusic className="size-3.5" />
-                    {t.menu.loadMorphVmd}
-                  </MenubarItem>
-                  <MenubarItem
-                    className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
-                    disabled={!studioReady}
-                    onSelect={() => cameraVmdInputRef.current?.click()}
-                  >
-                    <Video className="size-3.5" />
-                    {t.menu.loadCameraVmd}
-                  </MenubarItem>
-                  <MenubarItem
-                    className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
-                    onSelect={() => musicInputRef.current?.click()}
-                  >
-                    <Music className="size-3.5" />
-                    {t.menu.importMusic}
-                  </MenubarItem>
-                  <MenubarItem
-                    className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
-                    onSelect={() => videoInputRef.current?.click()}
-                  >
-                    <Film className="size-3.5" />
-                    {t.menu.importVideo}
-                  </MenubarItem>
-                </MenubarGroup>
-                <MenubarSeparator className="my-0.5" />
-                <MenubarGroup>
-                  <MenubarItem
-                    className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
+                  />
+                  <MenuAction
+                    icon={FileDown}
+                    label={t.menu.exportVmd}
                     disabled={!studioReady || !hasClip}
                     onSelect={() => exportClipVmd("all")}
-                  >
-                    <FileDown className="size-3.5" />
-                    {t.menu.exportVmd}
-                  </MenubarItem>
-                  <MenubarItem
-                    className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
-                    disabled={!studioReady || !hasMotion}
-                    onSelect={() => exportClipVmd("motion")}
-                  >
-                    <FileDown className="size-3.5" />
-                    {t.menu.exportMotion}
-                  </MenubarItem>
-                  <MenubarItem
-                    className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
-                    disabled={!studioReady || !hasMorphs}
-                    onSelect={() => exportClipVmd("morphs")}
-                  >
-                    <FileDown className="size-3.5" />
-                    {t.menu.exportMorphs}
-                  </MenubarItem>
-                  <MenubarItem
-                    className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
-                    disabled={!studioReady || cameraTrack.length === 0}
-                    onSelect={exportCameraVmd}
-                  >
-                    <Video className="size-3.5" />
-                    {t.menu.exportCamera}
-                  </MenubarItem>
-                </MenubarGroup>
-                <MenubarSeparator className="my-0.5" />
-                <MenubarGroup>
-                  <MenubarItem
-                    className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
-                    disabled={!studioReady || !hasMotion}
-                    onSelect={clearMotionTracks}
-                  >
-                    <Eraser className="size-3.5" />
-                    {t.menu.clearMotion}
-                  </MenubarItem>
-                  <MenubarItem
-                    className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
-                    disabled={!studioReady || !hasMorphs}
-                    onSelect={clearMorphTracks}
-                  >
-                    <Eraser className="size-3.5" />
-                    {t.menu.clearMorphs}
-                  </MenubarItem>
-                  <MenubarItem
-                    className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
-                    disabled={!studioReady || cameraTrack.length === 0}
-                    onSelect={clearCameraTrack}
-                  >
-                    <Eraser className="size-3.5" />
-                    {t.menu.clearCamera}
-                  </MenubarItem>
-                  <MenubarItem
-                    className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
-                    disabled={!hasMusic}
-                    onSelect={clearMusic}
-                  >
-                    <Eraser className="size-3.5" />
-                    {t.menu.clearMusic}
-                  </MenubarItem>
+                  />
                 </MenubarGroup>
 
-              </MenubarContent>
-            </MenubarMenu>
-            <MenubarMenu value="help">
-              <MenubarTrigger className="h-4 rounded-sm px-1.5 py-0 text-xs font-normal text-muted-foreground">
-                {t.menu.help}
-              </MenubarTrigger>
-              <MenubarContent sideOffset={4} className="min-w-32 p-0.5 text-xs">
+                <MenubarSeparator className="my-0.5" />
+                <MenuSectionLabel label={t.menu.groupMotion} />
                 <MenubarGroup>
-                  <MenubarItem className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground" asChild>
-                    <Link href={docsReadmeUrl} target="_blank" rel="noreferrer">
-                      {t.menu.tutorial}
-                    </Link>
-                  </MenubarItem>
-                  <MenubarSeparator className="my-0.5" />
-                  {/* Where an edited clip goes next: Studio makes the motion,
-                      Design makes the picture. */}
-                  <MenubarItem className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground" asChild>
-                    <Link href="https://reze.design" target="_blank" rel="noreferrer">
-                      {t.menu.renderScene}
-                    </Link>
-                  </MenubarItem>
-                  <MenubarItem className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground" disabled>
-                    {t.menu.shortcuts}
-                  </MenubarItem>
-                  <MenubarSeparator className="my-0.5" />
-                  <MenubarItem
-                    className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
-                    onSelect={() => {
-                      window.alert(`Reze Studio ${appVersion}\nWebGPU MMD editor — ${repoUrl}`)
-                    }}
-                  >
-                    {t.menu.about}
-                  </MenubarItem>
-                  <MenubarItem className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground" asChild>
-                    <Link href={`${repoUrl}/issues`} target="_blank" rel="noreferrer">
-                      {t.menu.reportIssue}
-                    </Link>
-                  </MenubarItem>
+                  <MenuAction
+                    icon={FileMusic}
+                    label={t.menu.openVmd}
+                    disabled={!studioReady}
+                    onSelect={() => vmdInputRef.current?.click()}
+                  />
+                  <MenuAction
+                    icon={FilePlus2}
+                    label={t.menu.importVmd}
+                    disabled={!studioReady}
+                    onSelect={onImportClip}
+                  />
+                  <MenuAction
+                    icon={FileDown}
+                    label={t.menu.exportMotion}
+                    disabled={!studioReady || !hasMotion}
+                    onSelect={() => exportClipVmd("motion")}
+                  />
+                  <MenuAction
+                    icon={Eraser}
+                    label={t.menu.clearMotion}
+                    disabled={!studioReady || !hasMotion}
+                    onSelect={clearMotionTracks}
+                  />
+                </MenubarGroup>
+
+                <MenubarSeparator className="my-0.5" />
+                <MenuSectionLabel label={t.menu.groupMorphs} />
+                <MenubarGroup>
+                  <MenuAction
+                    icon={FileMusic}
+                    label={t.menu.importMorphVmd}
+                    disabled={!studioReady}
+                    onSelect={() => morphVmdInputRef.current?.click()}
+                  />
+                  <MenuAction
+                    icon={FileDown}
+                    label={t.menu.exportMorphs}
+                    disabled={!studioReady || !hasMorphs}
+                    onSelect={() => exportClipVmd("morphs")}
+                  />
+                  <MenuAction
+                    icon={Eraser}
+                    label={t.menu.clearMorphs}
+                    disabled={!studioReady || !hasMorphs}
+                    onSelect={clearMorphTracks}
+                  />
+                </MenubarGroup>
+
+                <MenubarSeparator className="my-0.5" />
+                <MenuSectionLabel label={t.menu.groupCamera} />
+                <MenubarGroup>
+                  <MenuAction
+                    icon={Video}
+                    label={t.menu.importCameraVmd}
+                    disabled={!studioReady}
+                    onSelect={() => cameraVmdInputRef.current?.click()}
+                  />
+                  <MenuAction
+                    icon={FileDown}
+                    label={t.menu.exportCamera}
+                    disabled={!studioReady || cameraTrack.length === 0}
+                    onSelect={exportCameraVmd}
+                  />
+                  <MenuAction
+                    icon={Eraser}
+                    label={t.menu.clearCamera}
+                    disabled={!studioReady || cameraTrack.length === 0}
+                    onSelect={clearCameraTrack}
+                  />
+                </MenubarGroup>
+
+                <MenubarSeparator className="my-0.5" />
+                <MenuSectionLabel label={t.menu.groupMusic} />
+                <MenubarGroup>
+                  <MenuAction icon={Music} label={t.menu.importMusic} onSelect={() => musicInputRef.current?.click()} />
+                  <MenuAction icon={Eraser} label={t.menu.clearMusic} disabled={!hasMusic} onSelect={clearMusic} />
+                </MenubarGroup>
+
+                <MenubarSeparator className="my-0.5" />
+                <MenuSectionLabel label={t.menu.groupModel} />
+                <MenubarGroup>
+                  <MenuAction
+                    icon={FolderOpen}
+                    label={t.menu.loadPmx}
+                    onSelect={() => pmxFolderInputRef.current?.click()}
+                  />
+                  <MenuAction icon={Film} label={t.menu.importVideo} onSelect={() => videoInputRef.current?.click()} />
                 </MenubarGroup>
               </MenubarContent>
             </MenubarMenu>
@@ -676,54 +719,56 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
               </MenubarTrigger>
               <MenubarContent sideOffset={4} className="min-w-32 p-0.5 text-xs">
                 <MenubarGroup>
-                  <MenubarItem
-                    className="justify-between gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
-                    disabled={!clip}
-                    onSelect={onToggleIkEnabled}
-                  >
-                    <span>{t.menu.ikEnabled}</span>
-                    {ikEnabled ? (
-                      <Check className="size-3 shrink-0 text-blue-400" />
-                    ) : (
-                      <span className="size-3 shrink-0" />
-                    )}
-                  </MenubarItem>
-                  <MenubarItem
-                    className="justify-between gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
-                    onSelect={onToggleBoneOverlay}
-                  >
-                    <span>{t.menu.showSkeleton}</span>
-                    {boneOverlayVisible ? (
-                      <Check className="size-3 shrink-0 text-blue-400" />
-                    ) : (
-                      <span className="size-3 shrink-0" />
-                    )}
-                  </MenubarItem>
-                  <MenubarSeparator className="my-0.5" />
-                  {/* A flat row per locale rather than a submenu: there are two
-                      of them, and each is written in its own script so the one
-                      you want is the one you can read. */}
-                  <div className="px-2 pb-0.5 pt-1 text-[10px] uppercase tracking-[0.08em] text-muted-foreground">
-                    {t.menu.language}
-                  </div>
+                  <MenuToggle label={t.menu.ikEnabled} on={ikEnabled} disabled={!clip} onSelect={onToggleIkEnabled} />
+                  <MenuToggle label={t.menu.showSkeleton} on={boneOverlayVisible} onSelect={onToggleBoneOverlay} />
+                </MenubarGroup>
+                <MenubarSeparator className="my-0.5" />
+                {/* A flat row per locale rather than a submenu: there are two of
+                    them, and each is written in its own script, so the one you
+                    want is the one you can read. */}
+                <MenuSectionLabel label={t.menu.language} />
+                <MenubarGroup>
                   {LOCALES.map((code) => (
-                    <MenubarItem
+                    <MenuToggle
                       key={code}
-                      className="justify-between gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
+                      label={LOCALE_LABELS[code]}
+                      on={locale === code}
                       onSelect={() => setLocale(code)}
-                    >
-                      <span>{LOCALE_LABELS[code]}</span>
-                      {locale === code ? (
-                        <Check className="size-3 shrink-0 text-blue-400" />
-                      ) : (
-                        <span className="size-3 shrink-0" />
-                      )}
-                    </MenubarItem>
+                    />
                   ))}
-                  <MenubarSeparator className="my-0.5" />
-                  <MenubarItem className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground" disabled>
+                </MenubarGroup>
+                <MenubarSeparator className="my-0.5" />
+                <MenubarGroup>
+                  <MenubarItem className={MENU_ITEM} disabled>
                     {t.menu.theme}
                   </MenubarItem>
+                </MenubarGroup>
+              </MenubarContent>
+            </MenubarMenu>
+            <MenubarMenu value="help">
+              <MenubarTrigger className="h-4 rounded-sm px-1.5 py-0 text-xs font-normal text-muted-foreground">
+                {t.menu.help}
+              </MenubarTrigger>
+              <MenubarContent sideOffset={4} className="min-w-32 p-0.5 text-xs">
+                <MenubarGroup>
+                  <MenuLink href={docsReadmeUrl} label={t.menu.tutorial} />
+                  <MenubarItem className={MENU_ITEM} disabled>
+                    {t.menu.shortcuts}
+                  </MenubarItem>
+                </MenubarGroup>
+                <MenubarSeparator className="my-0.5" />
+                <MenubarGroup>
+                  {/* Where an edited clip goes next: Studio makes the motion,
+                      Design makes the picture. */}
+                  <MenuLink href="https://reze.design" label={t.menu.renderScene} />
+                </MenubarGroup>
+                <MenubarSeparator className="my-0.5" />
+                <MenubarGroup>
+                  <MenuAction
+                    label={t.menu.about}
+                    onSelect={() => window.alert(`Reze Studio ${appVersion}\nWebGPU MMD editor — ${repoUrl}`)}
+                  />
+                  <MenuLink href={`${repoUrl}/issues`} label={t.menu.reportIssue} />
                 </MenubarGroup>
               </MenubarContent>
             </MenubarMenu>
@@ -740,7 +785,7 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
                     key={p}
                     type="button"
                     title={p}
-                    className="truncate rounded-sm px-2 py-1.5 text-left text-[11px] hover:bg-accent hover:text-accent-foreground"
+                    className="truncate rounded-sm px-2 py-1.5 text-left text-[12px] hover:bg-accent hover:text-accent-foreground"
                     onClick={() => onPickPmxPath(p)}
                   >
                     {p.split("/").pop() || p}
@@ -769,17 +814,17 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
           // A section header's metrics, so the column reads as one grid — but
           // this one is SELECTED rather than opened, so it wears the selection
           // accent where the others wear a chevron.
-          "h-6 w-full shrink-0 justify-start gap-1 rounded-none border-t border-line px-2",
+          "h-8 w-full shrink-0 justify-start gap-2 rounded-none border-t border-line px-2",
           cameraSelected
             ? "bg-blue-400/[0.08] text-blue-400 hover:bg-blue-400/12 hover:text-blue-400"
             : "text-muted-foreground hover:bg-white/[0.03] hover:text-foreground dark:hover:bg-white/[0.03]",
         )}
       >
-        <span className="inline-flex w-3 shrink-0 justify-center text-[7px] leading-none" aria-hidden>
+        <span className="inline-flex w-3 shrink-0 justify-center text-[8px] leading-none" aria-hidden>
           {cameraSelected ? "\u25cf" : ""}
         </span>
         <span className="font-mono text-[11px] font-medium uppercase tracking-[0.1em]">{t.panel.camera}</span>
-        <span className="ml-auto shrink-0 font-mono text-[10px] tabular-nums tracking-normal">
+        <span className="ml-auto shrink-0 font-mono text-[11px] tabular-nums tracking-normal">
           {cameraTrack.length > 0 ? cameraTrack.length : "\u2014"}
         </span>
       </Button>
@@ -789,6 +834,12 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
 
 export function StudioPage() {
   const t = useT()
+  const toEngineClip = useEngineClip()
+  const activeOffset = useActiveOffset()
+  const removeSelectedPlacements = useRemoveSelectedPlacements()
+  const copySelectedPlacements = useCopySelectedPlacements()
+  const cutSelectedPlacements = useCutSelectedPlacements()
+  const pastePlacements = usePastePlacements()
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const engineRef = useRef<Engine | null>(null)
   const modelRef = useRef<Model | null>(null)
@@ -798,6 +849,7 @@ export function StudioPage() {
   // Slice subscriptions so unrelated state changes don't re-render this page.
   const clip = useStudioSelector((s) => s.clip)
   const library = useStudioSelector((s) => s.library)
+  const tracks = useStudioSelector((s) => s.tracks)
   const activeClipId = useStudioSelector((s) => s.activeClipId)
   const clipDisplayName = useStudioSelector((s) => s.clipDisplayName)
   const selectedBone = useStudioSelector((s) => s.selectedBone)
@@ -944,16 +996,51 @@ export function StudioPage() {
    *  no control on screen, a hide that survived a reload would be a set of
    *  panels nobody could get back without already knowing the key. */
   const [focusMode, setFocusMode] = useState(false)
+  const [timelineMode, setTimelineMode] = useState<"arrange" | "keys">(() => {
+    try {
+      return window.localStorage.getItem(TIMELINE_MODE_KEY) === "arrange" ? "arrange" : "keys"
+    } catch {
+      return "keys"
+    }
+  })
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(TIMELINE_MODE_KEY, timelineMode)
+    } catch {
+      // Private mode, or a full quota. Chrome geometry is not worth a warning.
+    }
+  }, [timelineMode])
+
+  /**
+   * The timeline shows whatever you are pointing at.
+   *
+   * Picking a bone, a morph or the camera is picking something whose KEYS you
+   * want — from the list, from the viewport, from the gizmo, it does not
+   * matter which — so the timeline drills in. Picking a clip is the opposite
+   * move and sends it back out (see onActivateClip). The toggle stays: this
+   * decides what you get without asking, not what you are allowed.
+   *
+   * Only a CHANGE counts. Running on the value itself would drag the mode back
+   * to Keys on every boot and every restore, where a selection arrives without
+   * anyone having chosen it just then.
+   */
+  const lastFineSelectionRef = useRef<string | null>(null)
+  useEffect(() => {
+    const fine = cameraSelected ? "camera" : (selectedBone ?? selectedMorph ?? null)
+    const previous = lastFineSelectionRef.current
+    lastFineSelectionRef.current = fine
+    if (fine != null && fine !== previous) setTimelineMode("keys")
+  }, [selectedBone, selectedMorph, cameraSelected])
   /** The skeleton drawn over the model — a ring per bone with links to its
-   *  children. On by default: this is an editor for posing a rig, and a rig you
-   *  cannot see is one you have to guess the shape of. The engine fills in the
-   *  selected bone's highlight from setSelectedBone, so this and the bone list
-   *  agree without being told about each other. */
+   *  children. OFF unless asked for: it stands between the camera and the
+   *  character, and most of what the viewport is for is seeing the character.
+   *  The engine fills in the selected bone's highlight from setSelectedBone, so
+   *  this and the bone list agree without being told about each other. */
   const [boneOverlay, setBoneOverlay] = useState(() => {
     try {
-      return window.localStorage.getItem(BONE_OVERLAY_KEY) !== "0"
+      return window.localStorage.getItem(BONE_OVERLAY_KEY) === "1"
     } catch {
-      return true
+      return false
     }
   })
   useEffect(() => {
@@ -1029,6 +1116,8 @@ export function StudioPage() {
   const clipDisplayNameRef = useRef("clip")
   const libraryRef = useRef(library)
   libraryRef.current = library
+  const tracksRef = useRef(tracks)
+  tracksRef.current = tracks
   const activeClipIdRef = useRef(activeClipId)
   activeClipIdRef.current = activeClipId
   const visibleBones = useMemo(() => {
@@ -1044,23 +1133,14 @@ export function StudioPage() {
     clipDisplayNameRef.current = clipDisplayName
   }, [clipDisplayName])
 
-  // ─── The clip must be at least as long as the camera shot ───────────────
-  //     The engine samples the camera off the MODEL's animation clock (see
-  //     reze-engine's cameraClockTime), and that clock is clamped to the clip's
-  //     own frameCount. A camera VMD carries no bone or morph frames at all, so
-  //     a camera-only load leaves the clip at its short default and the shot
-  //     freezes there — playhead still travelling, picture stuck.
-  //
-  //     An effect rather than a step in the load handler: a restored draft, an
-  //     undo, and a clip swap all reach this state too, and only one of those
-  //     goes through the file picker. Self-limiting — after the commit the
-  //     condition is false, so it runs once per genuine shortfall.
-  useEffect(() => {
-    if (!clip || cameraTrack.length === 0) return
-    const lastFrame = cameraTrack[cameraTrack.length - 1].frame
-    if (lastFrame <= clip.frameCount) return
-    commit({ ...clip, frameCount: lastFrame })
-  }, [clip, cameraTrack, commit])
+  // The clip used to be STRETCHED here to cover the camera shot, because the
+  // engine samples the camera off the model's animation clock and that clock is
+  // clamped to the loaded clip's frameCount. It cannot be done to the document
+  // any more: with a library, that rewrote whichever clip you had just clicked
+  // on to the length of the demo camera — a one-second take reporting 1:47 and
+  // filling its lane. The engine's copy is lengthened instead, in
+  // lib/engine-sync.ts, where it belongs: it is a fact about the clock, not
+  // about the clip.
 
   // ─── Persist the current draft (clip + editor state) to IndexedDB ────────
   //     Covers every edit, undo/redo, "New", playhead scrub, and bone
@@ -1097,11 +1177,13 @@ export function StudioPage() {
   }, [])
 
   useEffect(() => {
-    if (clip == null) return
-    saveDraftSoon(clipDisplayName, library, activeClipId, buildDraftExtras())
+    if (!studioReady) return
+    saveDraftSoon(clipDisplayName, library, tracks, activeClipId, buildDraftExtras())
   }, [
+    studioReady,
     clip,
     library,
+    tracks,
     activeClipId,
     clipDisplayName,
     currentFrame,
@@ -1123,8 +1205,7 @@ export function StudioPage() {
   const onTimelineViewChange = useCallback(
     (view: StoredTimelineView) => {
       timelineViewRef.current = view
-      if (clipRef.current == null) return
-      saveDraftSoon(clipDisplayNameRef.current, libraryRef.current, activeClipIdRef.current, buildDraftExtras())
+      saveDraftSoon(clipDisplayNameRef.current, libraryRef.current, tracksRef.current, activeClipIdRef.current, buildDraftExtras())
     },
     [buildDraftExtras],
   )
@@ -1154,6 +1235,25 @@ export function StudioPage() {
       // between keyframes when something's selected and falls back to this
       // same plain nudge otherwise, so there is exactly one handler deciding
       // what the arrows do instead of two racing on the same keydown.
+      // Arrange has no focusable canvas of its own, so its edit keys live on
+      // the window. In Keys mode the dopesheet owns these on its own focus, and
+      // the two views are never mounted together.
+      if (timelineMode === "arrange") {
+        const mod = e.metaKey || e.ctrlKey
+        if (e.key === "Delete" || e.key === "Backspace") {
+          e.preventDefault()
+          removeSelectedPlacements()
+        } else if (mod && e.key.toLowerCase() === "c") {
+          e.preventDefault()
+          copySelectedPlacements()
+        } else if (mod && e.key.toLowerCase() === "x") {
+          e.preventDefault()
+          cutSelectedPlacements()
+        } else if (mod && e.key.toLowerCase() === "v") {
+          e.preventDefault()
+          pastePlacements()
+        }
+      }
       if (e.code === "Home") setCurrentFrame(0)
       if (e.code === "End") setCurrentFrame(frameCount)
       // Backslash, because every letter worth having is already a transport or
@@ -1174,7 +1274,18 @@ export function StudioPage() {
     }
     window.addEventListener("keydown", onKey)
     return () => window.removeEventListener("keydown", onKey)
-  }, [frameCount, setCurrentFrame, setPlaying, undo, redo])
+  }, [
+    frameCount,
+    setCurrentFrame,
+    setPlaying,
+    undo,
+    redo,
+    timelineMode,
+    removeSelectedPlacements,
+    copySelectedPlacements,
+    cutSelectedPlacements,
+    pastePlacements,
+  ])
 
   // ─── Bone selection handlers ─────────────────────────────────────────
   const handleSelectGroup = useCallback(
@@ -1458,7 +1569,7 @@ export function StudioPage() {
   const pasteAtPlayhead = useCallback(() => {
     if (!clipboard) return
     const cb = clipboard
-    const base = Math.round(Math.max(0, currentFrame))
+    const base = Math.round(Math.max(0, currentFrame - activeOffset))
 
     if (cb.camera.length > 0) {
       commitCamera((prev) => {
@@ -1497,7 +1608,7 @@ export function StudioPage() {
     const isCam = cb.camera.length > 0
     const landed = [...new Set((isCam ? cb.camera : [...cb.bones, ...cb.morphs]).map((e) => base + e.rel))]
     setSelectedKeyframes(landed.map((frame) => ({ type: "dope", frame, ...(isCam ? { camera: true } : {}) })))
-  }, [clip, commit, commitCamera, currentFrame, setSelectedKeyframes])
+  }, [clip, commit, commitCamera, currentFrame, setSelectedKeyframes, activeOffset])
 
   /** Copy, then delete — one undoable step (the copy touches no history). */
   const cutSelectedKeyframes = useCallback(() => {
@@ -1508,7 +1619,7 @@ export function StudioPage() {
   const insertKeyframeAtPlayhead = useCallback(() => {
     const model = modelRef.current
     if (!clip || !model) return
-    const frame = Math.round(Math.max(0, currentFrame))
+    const frame = Math.round(Math.max(0, currentFrame - activeOffset))
 
     if (selectedMorph && !selectedBone) {
       // Read the current weight straight from the engine — it's the live
@@ -1542,7 +1653,7 @@ export function StudioPage() {
     boneTracks.set(selectedBone, nextTrack)
     commit({ ...clip, boneTracks })
     setSelectedKeyframes([{ type: "curve", bone: selectedBone, frame, channel: "rx" }])
-  }, [clip, selectedBone, selectedMorph, currentFrame, commit, setSelectedKeyframes])
+  }, [clip, selectedBone, selectedMorph, currentFrame, commit, setSelectedKeyframes, activeOffset])
 
   const simplifySelectedBoneTrack = useCallback(() => {
     if (!clip || !selectedBone) return
@@ -2015,6 +2126,10 @@ export function StudioPage() {
       setCurrentFrame(0)
       setSelectedKeyframes([])
       setClipVersion((v) => v + 1)
+      // Out to the arrangement: you asked about a CLIP, and where it sits is
+      // the thing a clip has that its keyframes do not. Picking a bone from
+      // here drills straight back in.
+      setTimelineMode("arrange")
     },
     [activeClipId, activateClip, setPlaying, setCurrentFrame, setSelectedKeyframes],
   )
@@ -2029,6 +2144,10 @@ export function StudioPage() {
 
   const onImportClip = useCallback(() => importVmdInputRef.current?.click(), [])
 
+  /** A clip is being dragged out of the library. It can only be dropped on a
+   *  lane, so the lanes are what the timeline had better be showing. */
+  const onDragClipToArrangement = useCallback(() => setTimelineMode("arrange"), [])
+
   /** Export the clip as VMD bytes. `tracks` splits the file the way MMD users
    *  actually keep them: the dance and the expressions as separate files, or
    *  both together. The suffix names which one you got — three downloads called
@@ -2037,17 +2156,24 @@ export function StudioPage() {
     (tracks: VmdTrackSelection = "all") => {
       const model = modelRef.current
       if (!model || !clip) return
-      const base = sanitizeClipFilenameBase(clipDisplayName)
+      // Named after the project's FIRST clip, not whichever one is open: the
+      // file holds the whole arrangement, and calling a three-clip export
+      // "hand_wave" describes one lane of it. With a single clip loaded the two
+      // are the same name anyway.
+      const base = sanitizeClipFilenameBase(library[0]?.name ?? clipDisplayName)
       const suffix = tracks === "all" ? "export" : tracks
       try {
-        model.loadClip(STUDIO_ANIM_NAME, clip)
+        // The ARRANGEMENT, not the clip that happens to be open. Exporting one
+        // lane of a two-lane project was exporting something the timeline had
+        // never shown.
+        model.loadClip(STUDIO_ANIM_NAME, toEngineClip(clip))
         const buf = model.exportVmd(STUDIO_ANIM_NAME, { tracks })
         downloadBlob(new Blob([buf], { type: "application/octet-stream" }), `${base}-${suffix}.vmd`)
       } catch (err) {
         window.alert(err instanceof Error ? err.message : String(err))
       }
     },
-    [clip, clipDisplayName],
+    [clip, clipDisplayName, library, toEngineClip],
   )
 
   /** Clear one half of the clip, or the camera, without touching the others.
@@ -2087,13 +2213,13 @@ export function StudioPage() {
     // EngineBridge's mirror), so the user is not left staring through a camera
     // that no longer exists.
     commitCamera([])
-    // The clip may have been stretched purely to cover the shot (see the
-    // "clip covers camera" effect); with the shot gone that length is not
-    // describing anything any more.
-    if (clip) commit({ ...clip, frameCount: durationAfterClear(clip) })
+    // The clip is NOT shortened to match. It used to be stretched to cover the
+    // shot, so dropping the shot meant dropping the stretch; nothing stretches
+    // it now, so its length is its own and shortening it here would quietly
+    // truncate a duration somebody set on purpose.
     setCameraSelected(false)
     setTimelineTab((t) => (isCameraTab(t) ? "allRot" : t))
-  }, [cameraTrack, clip, commit, commitCamera, setCameraSelected, setSelectedKeyframes])
+  }, [cameraTrack, commitCamera, setCameraSelected, setSelectedKeyframes])
 
   const resetStudioDocument = useCallback(() => {
     const model = modelRef.current
@@ -2353,6 +2479,7 @@ export function StudioPage() {
           onActivateClip={onActivateClip}
           onRemoveClip={onRemoveClip}
           onImportClip={onImportClip}
+          onDragClipToArrangement={onDragClipToArrangement}
           importVmdInputRef={importVmdInputRef}
           onPickImportVmdFile={onPickImportVmdFile}
           modelBones={sidebarBones}
@@ -2404,6 +2531,7 @@ export function StudioPage() {
               hasCameraTrack={cameraTrack.length > 0}
               cameraVmdEnabled={cameraVmdEnabled}
               onToggleCameraVmd={() => setCameraVmdEnabled((v) => !v)}
+              ikEnabled={ikEnabled}
             />
           </ResizablePanel>
           <ResizableHandle gutter />
@@ -2433,6 +2561,8 @@ export function StudioPage() {
                 onCopySelectedKeyframes={copySelectedKeyframes}
                 onCutSelectedKeyframes={cutSelectedKeyframes}
                 onPasteAtPlayhead={pasteAtPlayhead}
+                mode={timelineMode}
+                setMode={setTimelineMode}
               />
             )}
           </ResizablePanel>
@@ -2456,7 +2586,7 @@ export function StudioPage() {
             </TabsList>
             <TabsContent
               value="properties"
-              className="overflow-y-auto overflow-x-hidden px-3 py-2 text-[11px] [scrollbar-width:thin]"
+              className="overflow-y-auto overflow-x-hidden px-3 py-2 text-[12px] [scrollbar-width:thin]"
             >
               <PropertiesInspector
                 modelRef={modelRef}
@@ -2499,12 +2629,6 @@ export function StudioPage() {
           onClose={closeReferenceVideo}
         />
       )}
-      <StudioStatusFooter
-        clipDisplayName={clipDisplayName}
-        hasClip={clip != null}
-        ikEnabled={ikEnabled}
-        appVersion={APP_VERSION}
-      />
     </div>
   )
 }

@@ -53,7 +53,7 @@ export const AxisSliderRow = memo(function AxisSliderRow({
 
   return (
     <div className={cn("mb-1.5 px-1 flex items-center gap-1.5", disabled && "opacity-50")}>
-      <span className="w-3.5 shrink-0 text-[10px] font-semibold" style={{ color: color }}>
+      <span className="w-3.5 shrink-0 text-[11px] font-semibold" style={{ color: color }}>
         {axis}
       </span>
       <SliderPrimitive.Root
@@ -99,7 +99,7 @@ export const AxisSliderRow = memo(function AxisSliderRow({
         type="text"
         inputMode="decimal"
         disabled={disabled}
-        className="h-5 w-13 rounded-sm border border-input bg-muted ml-2 px-1.5 py-0.5 text-right font-mono text-[10px] tabular-nums shadow-none md:text-[10px]"
+        className="h-5 w-16 rounded-sm border border-input bg-muted ml-2 px-1.5 py-0.5 text-right font-mono text-[11px] tabular-nums shadow-none md:text-[11px]"
         style={{ color }}
         value={draft ?? (Number.isFinite(effectiveValue) ? effectiveValue.toFixed(decimals) : "")}
         onFocus={(e) => {

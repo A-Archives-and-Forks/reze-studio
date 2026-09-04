@@ -16,12 +16,23 @@ import {
   ChevronsRight,
   Pause,
   Play,
+  Scissors,
   ZoomIn,
   ZoomOut,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { cn, monoFont } from "@/lib/utils"
+import { cn, monoFont, DEFAULT_STUDIO_CLIP_FRAMES } from "@/lib/utils"
 import { useT, type Dictionary } from "@/lib/i18n"
+import {
+  ArrangeView,
+  useArrangementEnd,
+  useRemoveSelectedPlacements,
+  useActiveOffset,
+  useCopySelectedPlacements,
+  useCutSelectedPlacements,
+  usePastePlacements,
+  useSplitAtPlayhead,
+} from "@/components/arrange-view"
 import { useStudioActions, useStudioSelector, type SelectedKeyframe } from "@/context/studio-context"
 import { usePlayback } from "@/context/playback-context"
 import type { AnimationClip, BoneKeyframe, CameraKeyframe, MorphKeyframe } from "reze-engine"
@@ -53,17 +64,36 @@ const RULER_H = 17
 // it — the scroll origin, the curve clip, the zoom-to-fit maths — so widening
 // the gutter is this one number and nothing else.
 const LABEL_W = 42
+/** The arrangement's header column: a lane number and one toggle. Lanes are
+ *  managed automatically, so there is nothing else for it to hold. */
+const ARRANGE_LABEL_W = 52
 const DOT_R = 3.5
 const DIAMOND = 5
 const MIN_PX = 0.5
+/**
+ * How far the ARRANGEMENT can zoom out, in pixels per frame.
+ *
+ * Two orders of magnitude below the keyframe view's floor, because the two are
+ * looking at different things. A dopesheet below half a pixel per frame is a
+ * smear of diamonds and there is no reason to go there; an arrangement is
+ * clips end to end, and several minutes of them has to fit on screen at once
+ * or the view cannot answer the question it exists for. At 0.02 a nine-hundred
+ * pixel lane holds about twenty-five minutes.
+ */
+const ARRANGE_MIN_PX = 0.02
 const MAX_PX = 40
 const Y_ZOOM_MIN = 0.5
 const Y_ZOOM_MAX = 8
 
-function minPxPerFrameForViewport(trackWidthPx: number, frameCount: number): number {
-  if (frameCount <= 0 || trackWidthPx <= LABEL_W + 1) return MIN_PX
-  const fit = (trackWidthPx - LABEL_W) / frameCount
-  return Math.max(MIN_PX, Math.min(fit, MAX_PX))
+function minPxPerFrameForViewport(
+  trackWidthPx: number,
+  frameCount: number,
+  floor: number,
+  labelWidth: number,
+): number {
+  if (frameCount <= 0 || trackWidthPx <= labelWidth + 1) return floor
+  const fit = (trackWidthPx - labelWidth) / frameCount
+  return Math.max(floor, Math.min(fit, MAX_PX))
 }
 
 // 127-space wrapper over the engine's VMD bezier evaluator.
@@ -315,7 +345,7 @@ function TransportFrameSlider({
   }, [setFromClientX])
 
   const disabled = frameCount <= 0
-  const pct = !disabled && frameCount > 0 ? (value / frameCount) * 100 : 0
+  const pct = !disabled && frameCount > 0 ? Math.max(0, Math.min(100, (value / frameCount) * 100)) : 0
 
   return (
     <div className="mx-1 ml-0.5 flex shrink-0 select-none items-center">
@@ -359,6 +389,13 @@ function TransportFrameSlider({
 
 export type { SelectedKeyframe } from "@/context/studio-context"
 
+/** Round a zoom to something a readout can show, scaled to its magnitude —
+ *  hundredths under one, halves above ten. */
+function quantizeZoom(v: number, min: number, max: number): number {
+  const step = v < 0.2 ? 0.001 : v < 1 ? 0.01 : v < 10 ? 0.1 : 0.5
+  return Math.max(min, Math.min(max, Math.round(v / step) * step))
+}
+
 function ZoomRuler({
   min,
   max,
@@ -374,22 +411,22 @@ function ZoomRuler({
 }) {
   const trackRef = useRef<HTMLDivElement>(null)
   const dragging = useRef(false)
-  const span = max - min
 
+  // Geometric rather than linear. Time zoom now spans about two thousand to
+  // one, and on a linear track every useful low value would be crushed into
+  // the first pixel while three quarters of the travel sat above ten pixels
+  // per frame. A constant fraction of the width should be a constant RATIO.
   const setFromClientX = useCallback(
     (clientX: number) => {
       const el = trackRef.current
       if (!el) return
       const rect = el.getBoundingClientRect()
-      const s = max - min
-      const t = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
-      if (s <= 0) {
+      if (max <= min) {
         onChange(min)
         return
       }
-      const raw = min + t * s
-      const snap = (v: number) => (s < 2 ? Math.round(v * 100) / 100 : Math.round(v * 2) / 2)
-      onChange(Math.max(min, Math.min(max, snap(raw))))
+      const t = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
+      onChange(quantizeZoom(Math.exp(Math.log(min) + t * (Math.log(max) - Math.log(min))), min, max))
     },
     [min, max, onChange],
   )
@@ -412,11 +449,11 @@ function ZoomRuler({
     }
   }, [setFromClientX])
 
-  const pct = span > 0 ? ((value - min) / span) * 100 : 50
-  const snapVal = (v: number) => (span < 2 ? Math.round(v * 100) / 100 : Math.round(v * 2) / 2)
-  const nudgeDelta = span < 2 ? 0.05 : 0.5
-  const nudge = (dir: -1 | 1) =>
-    onChange(Math.max(min, Math.min(max, snapVal(value + dir * nudgeDelta))))
+  const pct =
+    max > min ? ((Math.log(Math.max(min, value)) - Math.log(min)) / (Math.log(max) - Math.log(min))) * 100 : 50
+  // A step is a ratio too, so the buttons move the same visible distance
+  // wherever the slider happens to be.
+  const nudge = (dir: -1 | 1) => onChange(quantizeZoom(value * Math.pow(1.35, dir), min, max))
 
   return (
     <div className="flex shrink-0 select-none items-center gap-1 text-muted-foreground">
@@ -540,6 +577,16 @@ interface TimelineCanvasProps {
   /** Timeline span — max of the clip's own length and the camera track's, so a
    *  camera-only load still gets a full ruler. See Timeline's `fc`. */
   frameCount: number
+  /**
+   * Arrangement frame minus clip-local frame, for the placement being edited.
+   *
+   * The ruler, the playhead and the transport all speak ARRANGEMENT frames —
+   * the viewport is playing the whole composite, not this clip alone — while
+   * keyframes are stored in the clip's own. So there are two origins below:
+   * `ox` for the axis, `oxKeys` for anything that belongs to the clip. Zero
+   * for a placement at the start, which is every one-VMD session.
+   */
+  offset: number
   /** RMS columns of the imported track, 0..1, or null with none loaded. */
   audioPeaks: readonly number[] | null
   /** Track length in seconds — the waveform is drawn to real time, not to the
@@ -596,6 +643,7 @@ interface TimelineCanvasProps {
 
 function TimelineCanvas({
   labels,
+  offset,
   clip,
   pxPerFrame,
   yZoom,
@@ -667,6 +715,7 @@ function TimelineCanvas({
     visibleBones: readonly string[] | null
     selectedKeyframes: readonly SelectedKeyframe[] | null
     labels: Dictionary["timeline"] | null
+    offset: number
     tab: string
     dragVersion: number
   }>({
@@ -684,6 +733,7 @@ function TimelineCanvas({
     visibleBones: null,
     selectedKeyframes: null,
     labels: null,
+    offset: 0,
     tab: "",
     dragVersion: 0,
   })
@@ -797,10 +847,13 @@ function TimelineCanvas({
       cache.visibleBones !== visibleBones ||
       cache.selectedKeyframes !== selectedKeyframes ||
       cache.labels !== labels ||
+      cache.offset !== offset ||
       cache.tab !== tab ||
       cache.dragVersion !== dragVersionRef.current
 
     const ox = LABEL_W - scrollX
+    // Where clip-local frame 0 sits on the axis.
+    const oxKeys = ox + offset * pxPerFrame
     const audioH = audioPeaks ? AUDIO_H : 0
     const audioY = h - audioH
     const dopeY = audioY - DOPE_H
@@ -816,7 +869,10 @@ function TimelineCanvas({
     const vMin = axCenter - axHalf
     const vMax = axCenter + axHalf
     const toY = (v: number) => curveTop + (1 - (v - vMin) / (vMax - vMin)) * curveH
-    const toX = (f: number) => ox + f * pxPerFrame
+    /** Clip-local frame → pixels. Every keyframe, curve and dope diamond. */
+    const toX = (f: number) => oxKeys + f * pxPerFrame
+    /** Arrangement frame → pixels. The ruler, the grid and the playhead. */
+    const toAxisX = (f: number) => ox + f * pxPerFrame
 
     if (needRepaintStatic) {
     if (off.width !== backingW || off.height !== backingH) {
@@ -851,12 +907,12 @@ function TimelineCanvas({
 
     const fStep = pxPerFrame >= 12 ? 1 : pxPerFrame >= 6 ? 5 : 10
     const fMajor = fStep * 10
-    const rulerFontPx = 9
+    const rulerFontPx = 10
     ctx.font = `${rulerFontPx}px ${FONT()}`
     ctx.textAlign = "center"
     ctx.textBaseline = "bottom"
     const rulerTickTop = (maj: boolean) => (maj ? 2 : RULER_H - 4)
-    const minRulerLabelGapPx = 32
+    const minRulerLabelGapPx = 36
     let lastRulerLabelX = -1e9
     for (let f = 0; f <= frameCount; f += fStep) {
       const x = ox + f * pxPerFrame
@@ -878,7 +934,7 @@ function TimelineCanvas({
     ctx.fillStyle = C.ruler
     ctx.fillRect(0, curveTop, LABEL_W, curveBot - curveTop)
 
-    ctx.font = `9px ${FONT()}`
+    ctx.font = `11px ${FONT()}`
     const isRotAxis = channels[0]?.group === "rot"
     // Snap tick iteration to multiples of subStep within the current view range,
     // further clamped to tickMin/tickMax — morph's plotted range pads past
@@ -936,7 +992,7 @@ function TimelineCanvas({
     // Vertical frame grid (skip x = LABEL_W — Y-axis above)
     ctx.lineWidth = 0.5
     for (let f = 0; f <= frameCount; f += fStep) {
-      const x = toX(f)
+      const x = toAxisX(f)
       if (x <= LABEL_W || x > w) continue
       ctx.strokeStyle = f % fMajor === 0 ? C.axis : C.grid
       ctx.beginPath()
@@ -1011,7 +1067,7 @@ function TimelineCanvas({
         }
       } else {
         ctx.fillStyle = C.label
-        ctx.font = `13px ${FONT()}`
+        ctx.font = `14px ${FONT()}`
         ctx.textAlign = "center"
         ctx.textBaseline = "middle"
         ctx.fillText(labels.noKeyframes(labels.camera), (w + LABEL_W) / 2, (curveTop + curveBot) / 2)
@@ -1054,14 +1110,14 @@ function TimelineCanvas({
           // (value readout is drawn in the per-tick overlay below)
         } else {
           ctx.fillStyle = C.label
-          ctx.font = `13px ${FONT()}`
+          ctx.font = `14px ${FONT()}`
           ctx.textAlign = "center"
           ctx.textBaseline = "middle"
           ctx.fillText(labels.noKeyframes(selectedMorph), (w + LABEL_W) / 2, (curveTop + curveBot) / 2)
         }
       } else {
         ctx.fillStyle = C.label
-        ctx.font = `13px ${FONT()}`
+        ctx.font = `14px ${FONT()}`
         ctx.textAlign = "center"
         ctx.textBaseline = "middle"
         ctx.fillText(labels.selectMorph, (w + LABEL_W) / 2, (curveTop + curveBot) / 2)
@@ -1209,14 +1265,14 @@ function TimelineCanvas({
         // (value readout is drawn in the per-tick overlay below)
       } else {
         ctx.fillStyle = C.label
-        ctx.font = `13px ${FONT()}`
+        ctx.font = `14px ${FONT()}`
         ctx.textAlign = "center"
         ctx.textBaseline = "middle"
         ctx.fillText(labels.noKeyframes(boneDisplayLabel(selectedBone)), (w + LABEL_W) / 2, (curveTop + curveBot) / 2)
       }
     } else {
       ctx.fillStyle = C.label
-      ctx.font = `13px ${FONT()}`
+      ctx.font = `14px ${FONT()}`
       ctx.textAlign = "center"
       ctx.textBaseline = "middle"
       ctx.fillText(labels.selectBone, (w + LABEL_W) / 2, (curveTop + curveBot) / 2)
@@ -1245,7 +1301,7 @@ function TimelineCanvas({
     // Dope grid
     ctx.lineWidth = 0.3
     for (let f = 0; f <= frameCount; f += fStep) {
-      const x = toX(f)
+      const x = toAxisX(f)
       if (x < LABEL_W || x > w) continue
       ctx.strokeStyle = C.grid
       ctx.beginPath()
@@ -1254,7 +1310,7 @@ function TimelineCanvas({
       ctx.stroke()
     }
 
-    ctx.font = `10px ${FONT()}`
+    ctx.font = `11px ${FONT()}`
     ctx.textAlign = "center"
     const sortedDope = Array.from(frames.entries()).sort((a, b) => a[0] - b[0])
     for (const [frame, count] of sortedDope) {
@@ -1336,7 +1392,7 @@ function TimelineCanvas({
       // names in one gutter, and anything that differs between them reads as a
       // difference in kind rather than in styling.
       ctx.fillStyle = C.dopeLabel
-      ctx.font = `10px ${FONT()}`
+      ctx.font = `11px ${FONT()}`
       ctx.textAlign = "right"
       ctx.textBaseline = "middle"
       ctx.fillText(labels.music, LABEL_W - 6, mid + 1)
@@ -1351,7 +1407,7 @@ function TimelineCanvas({
     ctx.lineTo(LABEL_W - 0.5, h)
     ctx.stroke()
     ctx.fillStyle = C.dopeLabel
-    ctx.font = `10px ${FONT()}`
+    ctx.font = `11px ${FONT()}`
     ctx.textAlign = "right"
     ctx.textBaseline = "middle"
     ctx.fillText(labels.keys, LABEL_W - 6, dopeMid + 2)
@@ -1370,6 +1426,7 @@ function TimelineCanvas({
       cache.visibleBones = visibleBones
       cache.selectedKeyframes = selectedKeyframes
         cache.labels = labels
+      cache.offset = offset
       cache.tab = tab
       cache.dragVersion = dragVersionRef.current
     }
@@ -1388,7 +1445,7 @@ function TimelineCanvas({
       if (tab === "morph" && selectedMorph) {
         const morphKfs = clip.morphTracks.get(selectedMorph)
         if (morphKfs && morphKfs.length > 0) {
-          ctx.font = `10px ${FONT()}`
+          ctx.font = `11px ${FONT()}`
           ctx.textBaseline = "top"
           ctx.textAlign = "right"
           // Sampled, for the same reason the bone readout below is: the curve
@@ -1401,7 +1458,7 @@ function TimelineCanvas({
       } else if (selectedBone) {
         const keyframes = clip.boneTracks.get(selectedBone)
         if (keyframes && keyframes.length > 0) {
-          ctx.font = `10px ${FONT()}`
+          ctx.font = `11px ${FONT()}`
           ctx.textBaseline = "top"
           ctx.textAlign = "right"
           // `?.` like the axis label above: the morph tab has no channels, so
@@ -1429,7 +1486,7 @@ function TimelineCanvas({
       }
 
       // ── Playhead ──
-      const px = toX(frame)
+      const px = toAxisX(frame)
       if (px >= LABEL_W && px <= w) {
         ctx.strokeStyle = C.playhead
         ctx.lineWidth = 1
@@ -1464,7 +1521,7 @@ function TimelineCanvas({
         }
       }
     }
-  }, [labels, clip, pxPerFrame, yZoom, scrollX, selectedBone, selectedMorph, cameraTrack, frameCount, audioPeaks, audioDuration, visibleBones, selectedKeyframes, tab, getDopeFrames])
+  }, [labels, offset, clip, pxPerFrame, yZoom, scrollX, selectedBone, selectedMorph, cameraTrack, frameCount, audioPeaks, audioDuration, visibleBones, selectedKeyframes, tab, getDopeFrames])
   drawRef2.current = draw
 
   // Layout-phase paint: `useEffect`+nested rAF ran after browser paint → playhead lagged 1–2 frames behind transport.
@@ -1519,6 +1576,7 @@ function TimelineCanvas({
       const mx = e.clientX - rect.left,
         my = e.clientY - rect.top
       const ox = LABEL_W - scrollX
+      const oxKeys = ox + offset * pxPerFrame
       const h = el.clientHeight
       const dopeY = h - DOPE_H - (audioPeaks ? AUDIO_H : 0)
       const curveH = dopeY - 1 - RULER_H
@@ -1528,9 +1586,12 @@ function TimelineCanvas({
       const vMin = axCenter - axHalf
       const vMax = axCenter + axHalf
       const toY = (v: number) => RULER_H + (1 - (v - vMin) / (vMax - vMin)) * curveH
-      const toX = (f: number) => ox + f * pxPerFrame
+      const toX = (f: number) => oxKeys + f * pxPerFrame
+      /** Pixels → clip-local frame, for everything that names a keyframe. */
+      const localAt = (x: number) => Math.round((x - oxKeys) / pxPerFrame)
 
       if (my < RULER_H) {
+        // The ruler sets the PLAYHEAD, which is an arrangement frame.
         const f = Math.round((mx - ox) / pxPerFrame)
         return { zone: "ruler" as const, frame: Math.max(0, Math.min(frameCount, f)) }
       }
@@ -1543,8 +1604,7 @@ function TimelineCanvas({
           if (Math.abs(mx - x) < 8 && Math.abs(my - dopeMid) < 12)
             return { zone: "dope" as const, frame }
         }
-        const f = Math.round((mx - ox) / pxPerFrame)
-        return { zone: "dope-empty" as const, frame: Math.max(0, Math.min(frameCount, f)) }
+        return { zone: "dope-empty" as const, frame: localAt(mx) }
       }
 
       if (isCameraTab(tab)) {
@@ -1582,10 +1642,9 @@ function TimelineCanvas({
         }
       }
 
-      const f = Math.round((mx - ox) / pxPerFrame)
-      return { zone: "curve-empty" as const, frame: Math.max(0, Math.min(frameCount, f)) }
+      return { zone: "curve-empty" as const, frame: localAt(mx) }
     },
-    [clip, pxPerFrame, yZoom, scrollX, selectedBone, selectedMorph, cameraTrack, frameCount, audioPeaks, tab, getDopeFrames],
+    [clip, pxPerFrame, yZoom, scrollX, offset, selectedBone, selectedMorph, cameraTrack, frameCount, audioPeaks, tab, getDopeFrames],
   )
 
   const onMouseDown = useCallback(
@@ -1729,7 +1788,7 @@ function TimelineCanvas({
           const vMinB = axCenterB - axHalfB
           const vMaxB = axCenterB + axHalfB
           const toYB = (v: number) => RULER_H + (1 - (v - vMinB) / (vMaxB - vMinB)) * curveHB
-          const toXB = (f: number) => LABEL_W - scrollX + f * pxPerFrame
+          const toXB = (f: number) => LABEL_W - scrollX + (f + offset) * pxPerFrame
           const bx0 = toXB(sb.minF) - pad
           const bx1 = toXB(sb.maxF) + pad
           const by0 = toYB(sb.maxV) - pad
@@ -1886,6 +1945,7 @@ function TimelineCanvas({
       const mx = e.clientX - rect.left
       const my = e.clientY - rect.top
       const ox = LABEL_W - scrollX
+      const oxKeys = ox + offset * pxPerFrame
 
       if (drag.current?.type === "scrub") {
         const f = Math.round((mx - ox) / pxPerFrame)
@@ -1981,7 +2041,7 @@ function TimelineCanvas({
         const vMin = axCenter - axHalf
         const vMax = axCenter + axHalf
         const toY = (v: number) => RULER_H + (1 - (v - vMin) / (vMax - vMin)) * curveH
-        const toX = (f: number) => ox + f * pxPerFrame
+        const toX = (f: number) => oxKeys + f * pxPerFrame
         const inRect = (x: number, y: number) => x >= x0 && x <= x1 && y >= y0 && y <= y1
 
         const entries: SelectedKeyframe[] = []
@@ -2018,8 +2078,8 @@ function TimelineCanvas({
         const valueFromY = (y: number) => vMin + (1 - (y - RULER_H) / curveH) * (vMax - vMin)
         d.lastCurveBox = {
           kind: "curve",
-          minF: (x0 - ox) / pxPerFrame,
-          maxF: (x1 - ox) / pxPerFrame,
+          minF: (x0 - oxKeys) / pxPerFrame,
+          maxF: (x1 - oxKeys) / pxPerFrame,
           minV: valueFromY(y1),
           maxV: valueFromY(y0),
         }
@@ -2033,7 +2093,7 @@ function TimelineCanvas({
       }
       if (drag.current?.type === "marquee") {
         const d = drag.current
-        const f = Math.max(0, Math.min(frameCount, Math.round((mx - ox) / pxPerFrame)))
+        const f = Math.round((mx - oxKeys) / pxPerFrame)
         const a = Math.min(d.marqueeStart ?? 0, f)
         const b = Math.max(d.marqueeStart ?? 0, f)
         marqueeRef.current = { kind: "band", a, b }
@@ -2115,7 +2175,7 @@ function TimelineCanvas({
         const vMin2 = axCenter2 - axHalf2
         const vMax2 = axCenter2 + axHalf2
         const toY2 = (v: number) => RULER_H + (1 - (v - vMin2) / (vMax2 - vMin2)) * curveH2
-        const toX2 = (f: number) => ox + f * pxPerFrame
+        const toX2 = (f: number) => oxKeys + f * pxPerFrame
         const pad = 4
         overStickyBox =
           mx >= toX2(sb2.minF) - pad &&
@@ -2135,7 +2195,7 @@ function TimelineCanvas({
                 ? "crosshair"
                 : "default"
     },
-    [hitTest, pxPerFrame, yZoom, scrollX, frameCount, audioPeaks, tab, clip, cameraTrack, selectedBone, selectedMorph, onSetCurrentFrame, onMoveDopeKeyframe, onMoveDopeColumns, onMarqueeSelect, onMarqueeSelectCurve, onMoveCurveSelection, getDopeFrames, onMoveCurveKeyframe, onMoveMorphKeyframe, onMoveCameraKeyframe],
+    [hitTest, pxPerFrame, yZoom, scrollX, offset, frameCount, audioPeaks, tab, clip, cameraTrack, selectedBone, selectedMorph, onSetCurrentFrame, onMoveDopeKeyframe, onMoveDopeColumns, onMarqueeSelect, onMarqueeSelectCurve, onMoveCurveSelection, getDopeFrames, onMoveCurveKeyframe, onMoveMorphKeyframe, onMoveCameraKeyframe],
   )
 
   const endDrag = useCallback(() => {
@@ -2318,6 +2378,9 @@ interface TimelineProps {
   onCopySelectedKeyframes: () => void
   onCutSelectedKeyframes: () => void
   onPasteAtPlayhead: () => void
+  /** Which half of the editor the area below the toolbar is showing. */
+  mode: "arrange" | "keys"
+  setMode: (mode: "arrange" | "keys") => void
 }
 
 export function Timeline({
@@ -2334,6 +2397,8 @@ export function Timeline({
   onCopySelectedKeyframes,
   onCutSelectedKeyframes,
   onPasteAtPlayhead,
+  mode,
+  setMode,
 }: TimelineProps) {
   const clip = useStudioSelector((s) => s.clip)
   const selectedBone = useStudioSelector((s) => s.selectedBone)
@@ -2341,8 +2406,17 @@ export function Timeline({
   const selectedKeyframes = useStudioSelector((s) => s.selectedKeyframes)
   const cameraTrack = useStudioSelector((s) => s.cameraTrack)
   const cameraSelected = useStudioSelector((s) => s.cameraSelected)
-  const { commit, commitCamera, setSelectedKeyframes } = useStudioActions()
+  const { commit, commitCamera, setSelectedKeyframes, setActivePlacement } = useStudioActions()
   const t = useT()
+  const arrangementEnd = useArrangementEnd()
+  const activeOffset = useActiveOffset()
+  const splitAtPlayhead = useSplitAtPlayhead()
+  const copyPlacements = useCopySelectedPlacements()
+  const cutPlacements = useCutSelectedPlacements()
+  const pastePlacements = usePastePlacements()
+  const selectedPlacementIds = useStudioSelector((s) => s.selectedPlacementIds)
+  const arrangePlayheadRef = useRef<HTMLDivElement | null>(null)
+  const arranging = mode === "arrange"
   const selectionKind: "bone" | "morph" | "camera" = cameraSelected
     ? "camera"
     : selectedMorph
@@ -2366,7 +2440,23 @@ export function Timeline({
   // while the shot itself runs for minutes — without this the ruler would end
   // long before the track it is drawing.
   const lastCameraFrame = cameraTrack.length > 0 ? cameraTrack[cameraTrack.length - 1].frame : 0
-  const fc = Math.max(clip?.frameCount ?? 0, lastCameraFrame)
+  // Keys used to measure against the ACTIVE CLIP's length while its ruler and
+  // playhead were already in arrangement time — so with a placement past the
+  // clip's own end the playhead ran off the end of the transport and its thumb
+  // left the track. The span is the arrangement's in both views; Keys adds the
+  // active clip's own tail, which is drawn (hatched) past the trim.
+  const activeTail = arranging ? 0 : activeOffset + (clip?.frameCount ?? 0)
+  // The camera's length counts in KEYS, where its keyframes are editable, and
+  // not in ARRANGE, where it has no lane. With the demo's 1:47 shot loaded it
+  // was setting the arrangement's span on its own, so adding a clip moved
+  // nothing: the ruler already ran three minutes past the last block, and the
+  // zoom range was measured against a span the lanes had no part in.
+  const fc = Math.max(
+    arrangementEnd,
+    activeTail,
+    arranging ? 0 : lastCameraFrame,
+    DEFAULT_STUDIO_CLIP_FRAMES,
+  )
   const [endDraft, setEndDraft] = useState<string | null>(null)
   const [frameDraft, setFrameDraft] = useState<string | null>(null)
   // Lazy-initialized from a restored draft's view, read once at first mount —
@@ -2392,7 +2482,16 @@ export function Timeline({
   const timelineAreaRef = useRef<HTMLDivElement>(null)
   const [trackWidth, setTrackWidth] = useState(0)
 
-  const minPxPerFrame = useMemo(() => minPxPerFrameForViewport(trackWidth, fc), [trackWidth, fc])
+  const minPxPerFrame = useMemo(
+    () =>
+      minPxPerFrameForViewport(
+        trackWidth,
+        fc,
+        arranging ? ARRANGE_MIN_PX : MIN_PX,
+        arranging ? ARRANGE_LABEL_W : LABEL_W,
+      ),
+    [trackWidth, fc, arranging],
+  )
 
   useEffect(() => {
     const el = timelineAreaRef.current
@@ -2403,8 +2502,18 @@ export function Timeline({
     return () => ro.disconnect()
   }, [])
 
+  // Zoomed all the way out means "show me everything", not "show me exactly
+  // this many frames" — so when the span grows, a view that was fitted refits.
+  // A view someone had zoomed INTO is left where they put it.
+  const previousMinPxRef = useRef(minPxPerFrame)
   useEffect(() => {
-    setPxPerFrame((p) => Math.min(MAX_PX, Math.max(minPxPerFrame, p)))
+    const previousMin = previousMinPxRef.current
+    previousMinPxRef.current = minPxPerFrame
+    setPxPerFrame((p) =>
+      Math.abs(p - previousMin) < 1e-6
+        ? Math.min(MAX_PX, minPxPerFrame)
+        : Math.min(MAX_PX, Math.max(minPxPerFrame, p)),
+    )
   }, [minPxPerFrame])
 
   // Reset local view state when a new clip is loaded or editor is reset.
@@ -2509,6 +2618,10 @@ export function Timeline({
       // Never while it is focused: that is someone typing a frame to jump to,
       // and rewriting the value under the caret makes the field unusable.
       if (field && document.activeElement !== field) field.value = padFrame4(frame)
+      const arrangePlayhead = arrangePlayheadRef.current
+      if (arrangePlayhead) {
+        arrangePlayhead.style.left = `${ARRANGE_LABEL_W + frame * pxRef.current - scrollXRef.current}px`
+      }
       const thumb = thumbElRef.current
       if (thumb) {
         const total = fcRef.current
@@ -2552,7 +2665,9 @@ export function Timeline({
     const onWheel = (e: WheelEvent) => {
       e.preventDefault()
       if (e.ctrlKey || e.metaKey) {
-        zoomTo(pxRef.current - e.deltaY * 0.02)
+        // Multiplicative, for the same reason the slider is: a fixed number
+        // of pixels per notch is a different amount of zoom at each end.
+        zoomTo(pxRef.current * Math.exp(-e.deltaY * 0.002))
       } else if (e.shiftKey) {
         // macOS remaps shift+wheel vertical delta onto deltaX — take whichever is non-zero.
         const delta = e.deltaY !== 0 ? e.deltaY : e.deltaX
@@ -2821,6 +2936,31 @@ export function Timeline({
     <div className="flex h-full w-full select-none flex-col" style={{ fontFamily: FONT() }}>
       {/* Toolbar — compact controls + channel tabs; axis hues stay exact via inline `t.color` when set */}
       <div className="flex h-[26px] shrink-0 flex-nowrap items-center gap-0.5 overflow-hidden border-b border-line bg-background px-1.5">
+        {/* Where you are, before anything about where you are pointing. */}
+        {(
+          [
+            { key: "arrange" as const, label: t.arrange.arrange, title: t.arrange.arrangeTitle },
+            { key: "keys" as const, label: t.arrange.keys, title: t.arrange.keysTitle },
+          ]
+        ).map((m) => (
+          <Button
+            key={m.key}
+            type="button"
+            variant="ghost"
+            size="sm"
+            title={m.title}
+            onClick={() => setMode(m.key)}
+            className={cn(
+              "h-5 shrink-0 rounded-md px-1.5 font-mono text-[11px] transition-none focus-visible:ring-0",
+              mode === m.key
+                ? "bg-foreground/90 text-background hover:bg-foreground hover:text-background dark:hover:bg-foreground"
+                : "text-muted-foreground opacity-65 hover:bg-transparent hover:opacity-100 dark:hover:bg-transparent",
+            )}
+          >
+            {m.label}
+          </Button>
+        ))}
+        <div className="mx-0.5 h-3.5 w-px shrink-0 bg-line" />
         {/* Fixed square + Lucide icons — avoids uneven unicode box and mixed h-5 / h-[22px] misalignment */}
         {(
           [
@@ -2909,7 +3049,7 @@ export function Timeline({
             setCurrentFrame(f)
           }}
         />
-        <div className="mx-0.5 flex min-w-0 items-center gap-0.5 whitespace-nowrap rounded-chip border border-line bg-surface-raised px-1 py-px font-mono text-[9px] tabular-nums text-muted-foreground">
+        <div className="mx-0.5 flex min-w-0 items-center gap-0.5 whitespace-nowrap rounded-chip border border-line bg-surface-raised px-1 py-px font-mono text-[10px] tabular-nums text-muted-foreground">
           <span>F</span>
           <input
             type="text"
@@ -2932,7 +3072,7 @@ export function Timeline({
               if (e.key === "Enter") (e.target as HTMLInputElement).blur()
             }}
             className={cn(
-              "h-4 w-8 min-w-0 rounded border border-transparent bg-transparent px-0.5 text-right text-[9px] tabular-nums outline-none",
+              "h-4 w-8 min-w-0 rounded border border-transparent bg-transparent px-0.5 text-right text-[10px] tabular-nums outline-none",
               "focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring/30",
               !clip && "pointer-events-none opacity-40",
             )}
@@ -2957,15 +3097,50 @@ export function Timeline({
               if (e.key === "Enter") (e.target as HTMLInputElement).blur()
             }}
             className={cn(
-              "h-4 w-8 min-w-0 rounded border border-transparent bg-transparent px-0.5 text-right text-[9px] tabular-nums outline-none",
+              "h-4 w-8 min-w-0 rounded border border-transparent bg-transparent px-0.5 text-right text-[10px] tabular-nums outline-none",
               "focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring/30",
               !clip && "pointer-events-none opacity-40",
             )}
           />
         </div>
         <div className="mx-0.5 h-3.5 w-px shrink-0 bg-line" />
+        {arranging ? (
+          <>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              title={t.arrange.splitTitle}
+              onClick={splitAtPlayhead}
+              className="h-5 shrink-0 gap-1 rounded-md px-1.5 font-mono text-[11px] text-muted-foreground hover:bg-transparent hover:text-foreground dark:hover:bg-transparent"
+            >
+              <Scissors className="size-3" />
+              {t.arrange.split}
+            </Button>
+            {(
+              [
+                { key: "copy", label: t.arrange.copy, run: copyPlacements, needsSelection: true },
+                { key: "cut", label: t.arrange.cut, run: cutPlacements, needsSelection: true },
+                { key: "paste", label: t.arrange.paste, run: pastePlacements, needsSelection: false },
+              ] as const
+            ).map((op) => (
+              <Button
+                key={op.key}
+                type="button"
+                variant="ghost"
+                size="sm"
+                disabled={op.needsSelection && selectedPlacementIds.length === 0}
+                onClick={op.run}
+                className="h-5 shrink-0 rounded-md px-1.5 font-mono text-[11px] text-muted-foreground hover:bg-transparent hover:text-foreground dark:hover:bg-transparent"
+              >
+                {op.label}
+              </Button>
+            ))}
+            <div className="mx-0.5 h-3.5 w-px shrink-0 bg-line" />
+          </>
+        ) : null}
         {/* Channel tabs */}
-        {visibleTabs.map((tabDef) => {
+        {!arranging && visibleTabs.map((tabDef) => {
           if (tabDef.sep)
             return <div key={tabDef.key} className="mx-px h-3.5 w-px shrink-0 bg-line" />
           const active = tab === tabDef.key
@@ -2977,7 +3152,7 @@ export function Timeline({
               size="sm"
               onClick={() => setTab(tabDef.key)}
               className={cn(
-                "h-5 max-h-5 min-h-5 shrink-0 overflow-hidden rounded-md px-1.5 font-mono text-[10px]",
+                "h-5 max-h-5 min-h-5 shrink-0 overflow-hidden rounded-md px-1.5 font-mono text-[11px]",
                 "focus-visible:outline-none focus-visible:ring-0",
                 // The Button base ships `transition-all`, which fades the fill
                 // in over ~150ms. That was invisible while the active chip was
@@ -3020,16 +3195,35 @@ export function Timeline({
           )
         })}
         <div className="min-w-0 flex-1" />
-        <span className="shrink-0 px-1 text-[10px] uppercase tracking-wide text-muted-foreground">{t.timeline.time}</span>
+        <span className="shrink-0 px-1 text-[11px] uppercase tracking-wide text-muted-foreground">{t.timeline.time}</span>
         <ZoomRuler min={minPxPerFrame} max={MAX_PX} value={pxPerFrame} onChange={zoomTo} labels={t.timeline} />
-        <span className="shrink-0 px-1 pl-2 text-[10px] uppercase tracking-wide text-muted-foreground">{t.timeline.value}</span>
-        <ZoomRuler min={Y_ZOOM_MIN} max={Y_ZOOM_MAX} value={yZoom} onChange={setYZoom} labels={t.timeline} />
+        {!arranging ? (
+          <>
+            <span className="shrink-0 px-1 pl-2 text-[11px] uppercase tracking-wide text-muted-foreground">
+              {t.timeline.value}
+            </span>
+            <ZoomRuler min={Y_ZOOM_MIN} max={Y_ZOOM_MAX} value={yZoom} onChange={setYZoom} labels={t.timeline} />
+          </>
+        ) : null}
       </div>
       {/* Canvas */}
       <div ref={timelineAreaRef} style={{ flex: 1, minHeight: 0 }}>
-        {clip ? (
+        {arranging ? (
+          <ArrangeView
+            pxPerFrame={pxPerFrame}
+            scrollX={scrollX}
+            labelWidth={ARRANGE_LABEL_W}
+            frameCount={fc}
+            playheadRef={arrangePlayheadRef}
+            onEditPlacement={(id) => {
+              setActivePlacement(id)
+              setMode("keys")
+            }}
+          />
+        ) : clip ? (
           <TimelineCanvas
             labels={t.timeline}
+            offset={activeOffset}
             clip={clip}
             pxPerFrame={pxPerFrame}
             yZoom={yZoom}

@@ -159,6 +159,39 @@ export function emptyTrack(name: string): Track {
   return { id: newId(), name, mute: false, solo: false, placements: [] }
 }
 
+/** Lanes an empty project offers. One, because a lane nobody has put anything
+ *  on is a row of empty space asking to be explained. */
+export const MIN_LANES = 1
+
+/**
+ * The lane list, kept to exactly the lanes in use.
+ *
+ * Nobody adds or deletes a lane here. A timeline that makes you manage its
+ * tracks before you can use them is asking about filing, and the question this
+ * view exists to answer is what plays over what — so lanes appear as they fill
+ * and retire as they empty.
+ *
+ * No standing spare, either: the place to put a NEW lane appears under the
+ * pointer while a clip is being dragged (see the phantom lane in
+ * arrange-view.tsx) and becomes real when one lands on it. An empty lane
+ * sitting there at rest is a row asking to be explained.
+ *
+ * Applied on every arrangement commit, so the invariant cannot drift.
+ */
+export function normalizeLanes(tracks: Track[]): Track[] {
+  let lastUsed = -1
+  tracks.forEach((t, i) => {
+    if (t.placements.length > 0) lastUsed = i
+  })
+  const wanted = Math.max(MIN_LANES, lastUsed + 1)
+  // Trailing empties beyond what is wanted go, but a soloed or muted one stays:
+  // those are states someone set, and dropping them would undo that silently.
+  const kept = tracks.filter((t, i) => i <= lastUsed || i < wanted || t.mute || t.solo)
+  const out = [...kept]
+  while (out.length < wanted) out.push(emptyTrack(`Track ${out.length + 1}`))
+  return out
+}
+
 export function emptyProject(name = "project"): Project {
   return { name, library: [], tracks: [emptyTrack("Track 1")] }
 }

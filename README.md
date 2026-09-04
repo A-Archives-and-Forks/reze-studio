@@ -39,7 +39,11 @@ A modern, web-native take on MMD animation editing — a dedicated timeline and 
 - [x] Unsaved-change warning on tab close / refresh
 - [x] Viewport bone pick (double-click) + 3D transform gizmo drag
 - [x] Material pick in Materials panel with highlight outline
-- [ ] Animation layers with blend weights and bone masks
+- [x] Clip library: import several VMDs, keep them side by side, edit one at a time
+- [x] Arrange view: clips on tracks, drag / trim / split / copy / paste, tracks that appear as you fill them
+- [x] Per-frame per-bone layering, so a face-only VMD composes with a body-only one
+- [x] English / Chinese interface
+- [ ] Blend weights and explicit bone masks per track
 - [ ] Custom bone groups with mute / solo toggle
 - [ ] Mirrored paste (左↔右), clip import (merge another take's keys in), time stretch
 - [ ] Mocap import (video → VMD)
@@ -85,6 +89,8 @@ A typical workflow in Reze Studio:
 | `Ctrl` / `⌘` + `Z`                    | Undo last clip edit                                          |
 | `Ctrl` / `⌘` + `Shift` + `Z`, `⌘`+`Y` | Redo                                                          |
 | `\`                                   | Hide / show the side panels                                   |
+| `Delete` _(Arrange)_                  | Remove the selected clips from their lanes                    |
+| `Ctrl` / `⌘` + `C` / `X` / `V` _(Arrange)_ | Copy / cut / paste clips, pasted at the playhead          |
 | `←` / `→` _(in frame input)_          | Decrement / increment playhead frame                          |
 | `Shift` + mouse wheel                 | Zoom the value / Y axis                                       |
 | `Ctrl` / `Command` + mouse wheel      | Zoom the time / X axis                                        |

@@ -48,7 +48,7 @@ const GroupRow = memo(function GroupRow({
       type="button"
       onClick={onClick}
       className={cn(
-        "flex h-full w-full items-center gap-0 border-l-2 px-3 text-left text-[11px] font-medium leading-none text-muted-foreground",
+        "flex h-full w-full items-center gap-0 border-l-2 px-3 text-left text-[12px] font-medium leading-none text-muted-foreground",
         isSelected
           ? "border-blue-400 bg-white/[0.03] text-blue-400 hover:bg-white/[0.05]"
           : "border-transparent hover:bg-white/[0.03]",
@@ -89,18 +89,18 @@ const BoneRow = memo(function BoneRow({
       type="button"
       onClick={onClick}
       className={cn(
-        "flex h-full w-full items-center gap-1 pl-6 pr-3 text-left font-mono text-[11px] font-normal leading-none",
+        "flex h-full w-full items-center gap-1 pl-6 pr-3 text-left font-mono text-[12px] font-normal leading-none",
         isActive
           ? "bg-blue-400/[0.08] text-blue-400 hover:bg-blue-400/12"
           : "text-muted-foreground hover:bg-white/[0.03]",
       )}
     >
-      <span className="inline-flex w-1.5 shrink-0 text-[7px] leading-none" aria-hidden>
+      <span className="inline-flex w-1.5 shrink-0 text-[8px] leading-none" aria-hidden>
         {isActive ? "●" : ""}
       </span>
       <span className="min-w-0 flex-1 truncate">{name}</span>
       {kfCount > 0 && (
-        <span className={cn("shrink-0 pr-1 tabular-nums text-[10px]", isActive ? "text-blue-400" : "text-muted-foreground")}>
+        <span className={cn("shrink-0 pr-1 tabular-nums text-[11px]", isActive ? "text-blue-400" : "text-muted-foreground")}>
           [{kfCount}]
         </span>
       )}

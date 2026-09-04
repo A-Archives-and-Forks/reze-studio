@@ -12,12 +12,13 @@ import {
   createElement,
   memo,
   useContext,
+  useEffect,
   useRef,
+  useState,
   useSyncExternalStore,
   type ReactNode,
 } from "react"
 import { useT } from "@/lib/i18n"
-import { cn } from "@/lib/utils"
 
 export type StudioStatusState = {
   pmxFileName: string
@@ -97,62 +98,42 @@ export function useStudioStatusActions(): StudioStatusActions {
   return useStore().actions
 }
 
-/** Footer — subscribes to its own slices so FPS ticks don't touch the page. */
-export const StudioStatusFooter = memo(function StudioStatusFooter({
-  clipDisplayName,
-  hasClip,
-  ikEnabled,
-  appVersion,
-}: {
-  clipDisplayName: string
-  hasClip: boolean
-  ikEnabled: boolean
-  appVersion: string
-}) {
+/**
+ * The two things the status bar was actually for, over the viewport instead of
+ * under everything.
+ *
+ * A full-width bar spent a row of the window on four labels that never change
+ * and one number that does. What is left is what a bar was the wrong shape for:
+ * a message that appears when something happened and leaves on its own, and a
+ * corner readout for the health of the frame.
+ */
+export const StudioStatusOverlay = memo(function StudioStatusOverlay({ ikEnabled }: { ikEnabled: boolean }) {
   const t = useT()
-  const pmxFileName = useStudioStatusSelector((s) => s.pmxFileName)
   const fps = useStudioStatusSelector((s) => s.fps)
   const message = useStudioStatusSelector((s) => s.message)
+  // Shown, then gone. The store keeps the last message forever — it has no idea
+  // when one has been read — so the fade is the overlay's own business.
+  const [visible, setVisible] = useState("")
+  useEffect(() => {
+    if (message === "") return
+    setVisible(message)
+    const id = setTimeout(() => setVisible(""), 4000)
+    return () => clearTimeout(id)
+  }, [message])
+
   return (
-    <footer
-      className="flex h-6 shrink-0 items-center gap-2 border-t border-line-strong px-2 text-[10.5px] text-muted-foreground"
-      role="status"
-      aria-live="polite"
-    >
-      <div className="flex min-w-0 shrink-0 items-center gap-x-2 [overflow-wrap:anywhere]">
-        <span>
-          {t.footer.model}:{" "}
-          <span className="font-medium text-foreground" title={pmxFileName}>
-            {pmxFileName}
-          </span>
-        </span>
-        <span className="text-muted-foreground" aria-hidden>
-          ·
-        </span>
-        <span>
-          {t.footer.animation}:{" "}
-          <span className="font-medium text-foreground" title={hasClip ? `${clipDisplayName}.vmd` : undefined}>
-            {hasClip ? `${clipDisplayName}.vmd` : "—"}
-          </span>
-        </span>
-        <span className="text-muted-foreground" aria-hidden>
-          ·
-        </span>
-        <span title={t.footer.ikTitle}>
-          {t.footer.ik}:{" "}
-          <span className={cn("font-medium", ikEnabled ? "text-foreground" : "text-amber-400")}>
-            {ikEnabled ? t.footer.on : t.footer.off}
-          </span>
-        </span>
-      </div>
-      <div className="min-w-0 flex-1 truncate px-2 text-left text-[10px] text-muted-foreground">{message}</div>
-      <div className="flex shrink-0 items-center gap-x-2 tabular-nums">
+    <>
+      {visible !== "" ? (
+        <div className="pointer-events-none absolute inset-x-0 bottom-3 z-20 flex justify-center">
+          <div className="max-w-[80%] truncate rounded-full border border-line-strong bg-surface-raised px-3 py-1 text-[11px] text-muted-foreground shadow-float">
+            {visible}
+          </div>
+        </div>
+      ) : null}
+      <div className="pointer-events-none absolute bottom-2 right-3 z-10 flex items-center gap-2 font-mono text-[10px] tabular-nums text-muted-foreground">
+        {!ikEnabled ? <span className="text-amber-400">{t.footer.ik} {t.footer.off}</span> : null}
         <span title={t.footer.fpsTitle}>{fps != null ? `${fps} FPS` : "— FPS"}</span>
-        <span className="text-muted-foreground" aria-hidden>
-          ·
-        </span>
-        <span>v{appVersion}</span>
       </div>
-    </footer>
+    </>
   )
 })

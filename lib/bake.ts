@@ -24,11 +24,21 @@
 //    segment's easing is SPLIT rather than copied, so the motion inside the cut
 //    is the motion the source clip had. See splitInterpolation in lib/utils.
 //
-// A frame no placement covers for a name emits nothing, and the engine holds
-// the last key — which is what VMD does between keys anyway.
+// A CLIP'S INFLUENCE IS ITS SPAN — at the ENDS of the arrangement. VMD holds
+// the last key forever and extrapolates the first one backwards, so a ten-frame
+// clip laid on a lane would otherwise pose its bones for the whole timeline in
+// both directions: the pose arriving before the clip does and staying long
+// after it ends. Before anything has played and after everything has, the bake
+// writes the REST pose, which is where a bone with no keyframe sits.
+//
+// A gap BETWEEN two placements is a different question and gets a different
+// answer: it HOLDS the pose the previous one ended on. Snapping to rest there
+// would be two lurches — out of the pose and back into the next one — across a
+// stretch where the arrangement is not asking for anything to happen.
 
 import type { AnimationClip, BoneInterpolation, BoneKeyframe, IkKeyframe, MorphKeyframe } from "reze-engine"
 import { Vec3 } from "reze-engine"
+import { Quat } from "reze-engine"
 import {
   activeTracks,
   clipById,
@@ -235,6 +245,79 @@ function bakeIkInterval(interval: Interval, name: string): IkKeyframe[] {
   return out
 }
 
+/** A bone at rest: no rotation, no translation — what an unkeyed bone is. */
+function restBoneKey(name: string, frame: number): BoneKeyframe {
+  return {
+    boneName: name,
+    frame,
+    rotation: new Quat(0, 0, 0, 1),
+    translation: new Vec3(0, 0, 0),
+    interpolation: cloneBoneInterpolation(VMD_LINEAR_DEFAULT_IP),
+  }
+}
+
+/**
+ * A frame where nothing is driving the name, and what should be written there.
+ *
+ * `hold` names the interval whose final pose carries across; null means rest.
+ */
+type Boundary = { frame: number; hold: Interval | null }
+
+/**
+ * The edges of the stretches nobody owns.
+ *
+ * Before the first placement, two rest keys rather than one: rest has to be
+ * HELD up to the moment the clip starts, and a single key at frame 0 would just
+ * be the far end of an interpolation into the first pose.
+ *
+ * Between placements, ONE key at the last frame of the gap, carrying the
+ * previous placement's final pose. That value already sits on the previous
+ * interval's own closing key, so the two together make a flat hold — and the
+ * transition into the next placement happens over the single frame between
+ * them, where the arrangement says it does.
+ *
+ * Nothing is written past the arrangement's own end: there is no gap there,
+ * only the timeline running out, and a rest key on the final frame would snap
+ * the model to a T-pose as it finishes.
+ */
+function boundaries(intervals: Interval[], arrangementEnd: number): Boundary[] {
+  const out: Boundary[] = []
+  if (intervals.length === 0) return out
+  const first = intervals[0]
+  if (first.from > 0) {
+    out.push({ frame: 0, hold: null })
+    if (first.from - 1 > 0) out.push({ frame: first.from - 1, hold: null })
+  }
+  for (let i = 1; i < intervals.length; i++) {
+    const prev = intervals[i - 1]
+    const next = intervals[i]
+    if (next.from - 1 >= prev.to) out.push({ frame: next.from - 1, hold: prev })
+  }
+  const last = intervals[intervals.length - 1]
+  if (last.to < arrangementEnd) out.push({ frame: last.to, hold: null })
+  return out
+}
+
+/** The pose an interval leaves behind — its source, at its own last frame. */
+function heldBoneKey(interval: Interval, name: string, frame: number): BoneKeyframe {
+  const source = interval.clip.boneTracks.get(name)
+  if (!source || source.length === 0) return restBoneKey(name, frame)
+  const pose = evalBoneTrackAt(source, interval.to - 1 - offsetOf(interval.placement))
+  return {
+    boneName: name,
+    frame,
+    rotation: pose.rotation,
+    translation: pose.translation,
+    interpolation: cloneBoneInterpolation(VMD_LINEAR_DEFAULT_IP),
+  }
+}
+
+function heldMorphWeight(interval: Interval, name: string): number {
+  const source = interval.clip.morphTracks.get(name)
+  if (!source || source.length === 0) return 0
+  return sampleMorphTrackAt(source, interval.to - 1 - offsetOf(interval.placement))
+}
+
 /** Sort by frame; where two land on one frame the later one wins, which is the
  *  order intervals were emitted in. */
 function dedupe<T extends { frame: number }>(keys: T[]): T[] {
@@ -274,13 +357,41 @@ export function bakeName(
 ): BoneKeyframe[] | MorphKeyframe[] | IkKeyframe[] {
   const intervals = ownershipIntervals(project, kind, name)
   const last = intervals.length - 1
+  // A gap counts as a follower: the rest keys written into it are what the
+  // interval before has to stop interpolating into.
+  const end = coveredEnd(project)
+  const edges = boundaries(intervals, end)
+  // A boundary counts as a follower: it is what the interval before has to stop
+  // interpolating into.
+  const followed = (i: number) => i < last || edges.some((b) => b.frame >= (intervals[i]?.to ?? 0))
   if (kind === "bone") {
-    return dedupe(intervals.flatMap((iv, i) => bakeBoneInterval(iv, name, i === 0, i < last)))
+    const keys = intervals.flatMap((iv, i) => bakeBoneInterval(iv, name, i === 0, followed(i)))
+    const edgeKeys = edges.map((b) => (b.hold ? heldBoneKey(b.hold, name, b.frame) : restBoneKey(name, b.frame)))
+    return dedupe([...keys, ...edgeKeys])
   }
   if (kind === "morph") {
-    return dedupe(intervals.flatMap((iv, i) => bakeMorphInterval(iv, name, i < last)))
+    const keys = intervals.flatMap((iv, i) => bakeMorphInterval(iv, name, followed(i)))
+    const edgeKeys = edges.map((b) => ({
+      morphName: name,
+      frame: b.frame,
+      weight: b.hold ? heldMorphWeight(b.hold, name) : 0,
+    }))
+    return dedupe([...keys, ...edgeKeys])
   }
   return dedupe(intervals.flatMap((i) => bakeIkInterval(i, name)))
+}
+
+/** The last frame any placement reaches. Not `projectEnd`, which floors at a
+ *  default clip length — a floor would put a rest key past the real content. */
+function coveredEnd(project: Project): number {
+  let end = 0
+  for (const track of project.tracks) {
+    for (const p of track.placements) {
+      const lib = clipById(project, p.clipId)
+      if (lib) end = Math.max(end, placementEnd(p, lib.clip))
+    }
+  }
+  return end
 }
 
 /** The whole arrangement as one clip. */

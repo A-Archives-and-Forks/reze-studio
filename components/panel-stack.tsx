@@ -18,15 +18,9 @@
  * squeezes its neighbours out or strands empty space.
  */
 
-import {
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  type PointerEvent as ReactPointerEvent,
-  type ReactNode,
-} from "react"
+import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react"
 import { ChevronRight } from "lucide-react"
+import type { ComponentType } from "react"
 import { Button } from "@/components/ui/button"
 import { useT } from "@/lib/i18n"
 import { storageKey } from "@/lib/storage"
@@ -42,6 +36,11 @@ export type PanelStackSection = {
   id: string
   /** Shown uppercase in the header. */
   label: string
+  /** Marks the KIND of thing the section holds. The rows below are all names —
+   *  clip names, bone names, morph names, in the same mono at nearly the same
+   *  size — so a heading set only in caps reads as one more row until you look
+   *  twice. An icon is the part that cannot be mistaken for a name. */
+  icon?: ComponentType<{ className?: string }>
   /** Right-aligned in the header — how many rows the body holds. */
   count?: number
   /** Between the label and the count: what this section is scoped to (the
@@ -49,6 +48,16 @@ export type PanelStackSection = {
   scope?: string
   /** Share of the open height relative to its open siblings. */
   defaultWeight?: number
+  /**
+   * Set to size this section by its CONTENT, up to this many pixels.
+   *
+   * A list of three clips has no use for a third of the column, and the lists
+   * below it do — so a fitted section holds exactly what it holds and the
+   * leftover goes to the sections that can fill it. The height comes from the
+   * content rather than from a formula the caller maintains, so the gap under
+   * the last row is the same whether there is one row or six.
+   */
+  fitMaxHeight?: number
   title?: string
   body: ReactNode
 }
@@ -83,6 +92,7 @@ function readPrefs(key: string): StackPrefs {
  *  target, since a 12px chevron is not one. */
 function SectionHeader({
   label,
+  icon: Icon,
   count,
   scope,
   open,
@@ -90,6 +100,7 @@ function SectionHeader({
   title,
 }: {
   label: string
+  icon?: ComponentType<{ className?: string }>
   count?: number
   scope?: string
   open: boolean
@@ -109,18 +120,14 @@ function SectionHeader({
         "hover:bg-white/[0.03] hover:text-foreground dark:hover:bg-white/[0.03]",
       )}
     >
-      <ChevronRight
-        className={cn("size-3 shrink-0 transition-transform", open && "rotate-90")}
-        strokeWidth={2.5}
-      />
+      <ChevronRight className={cn("size-3 shrink-0 transition-transform", open && "rotate-90")} strokeWidth={2.5} />
+      {Icon ? <Icon className="size-3.5 shrink-0" /> : null}
       <span className="font-mono text-[11px] font-medium uppercase tracking-[0.1em]">{label}</span>
       {scope ? (
-        <span className="min-w-0 truncate font-mono text-[10px] normal-case tracking-normal">
-          · {scope}
-        </span>
+        <span className="min-w-0 truncate font-mono text-[11px] normal-case tracking-normal">· {scope}</span>
       ) : null}
       {count != null ? (
-        <span className="ml-auto shrink-0 font-mono text-[10px] tabular-nums tracking-normal">{count}</span>
+        <span className="ml-auto shrink-0 font-mono text-[11px] tabular-nums tracking-normal">{count}</span>
       ) : null}
     </Button>
   )
@@ -138,9 +145,7 @@ export function PanelStack({
 }) {
   const t = useT()
   const prefsKey = storageKey(`panelStack.${id}`)
-  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(
-    () => new Set(readPrefs(prefsKey).collapsed),
-  )
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set(readPrefs(prefsKey).collapsed))
   const [weights, setWeights] = useState<Record<string, number>>(() => readPrefs(prefsKey).weights)
 
   useEffect(() => {
@@ -165,10 +170,7 @@ export function PanelStack({
     weightTotal: number
   } | null>(null)
 
-  const weightOf = useCallback(
-    (s: PanelStackSection) => weights[s.id] ?? s.defaultWeight ?? 1,
-    [weights],
-  )
+  const weightOf = useCallback((s: PanelStackSection) => weights[s.id] ?? s.defaultWeight ?? 1, [weights])
 
   const toggle = useCallback((sectionId: string) => {
     setCollapsed((prev) => {
@@ -210,7 +212,11 @@ export function PanelStack({
     const hi = Math.max(lo, d.total - lo)
     const nextA = Math.max(lo, Math.min(hi, d.heightA + (e.clientY - d.startY)))
     const weightA = (d.weightTotal * nextA) / d.total
-    setWeights((prev) => ({ ...prev, [d.aId]: weightA, [d.bId]: d.weightTotal - weightA }))
+    setWeights((prev) => ({
+      ...prev,
+      [d.aId]: weightA,
+      [d.bId]: d.weightTotal - weightA,
+    }))
   }, [])
 
   const onHandleUp = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
@@ -222,33 +228,64 @@ export function PanelStack({
     }
   }, [])
 
-  const openSections = sections.filter((s) => !collapsed.has(s.id))
+  // Fitted sections are not part of the weight arithmetic — they take what
+  // they need first, and the handles only ever divide what is left between the
+  // sections that grow.
+  const openSections = sections.filter((s) => !collapsed.has(s.id) && s.fitMaxHeight == null)
   const lastOpenId = openSections.length > 0 ? openSections[openSections.length - 1].id : null
 
   return (
     <div className={cn("flex min-h-0 flex-col", className)}>
-      {sections.map((section) => {
+      {sections.map((section, index) => {
         const open = !collapsed.has(section.id)
-        const next = open && section.id !== lastOpenId ? openSections[openSections.indexOf(section) + 1] : null
+        const fitted = open && section.fitMaxHeight != null
+        const next =
+          open && !fitted && section.id !== lastOpenId ? openSections[openSections.indexOf(section) + 1] : null
         return (
           <div
             key={section.id}
             ref={(el) => {
               sectionRefs.current.set(section.id, el)
             }}
-            className={cn("flex min-h-0 flex-col", open ? "flex-auto" : "shrink-0")}
-            style={open ? { flexGrow: weightOf(section), flexBasis: 0 } : undefined}
+            // A seam at every join, so the column reads as sections rather than
+            // one long list — and so the resize strip below has something to
+            // straddle. The first needs none: the panel above it has its own.
+            className={cn(
+              "flex min-h-0 flex-col",
+              index > 0 && "border-t border-line",
+              open && !fitted ? "flex-auto" : "shrink-0",
+            )}
+            style={open && !fitted ? { flexGrow: weightOf(section), flexBasis: 0 } : undefined}
           >
             <SectionHeader
               label={section.label}
+              icon={section.icon}
               count={section.count}
               scope={section.scope}
               title={section.title}
               open={open}
               onToggle={() => toggle(section.id)}
             />
-            {open ? <div className="min-h-0 flex-1 overflow-hidden">{section.body}</div> : null}
+            {open ? (
+              <div
+                className="min-h-0 flex-1 overflow-hidden"
+                style={
+                  fitted
+                    ? {
+                        flex: "none",
+                        maxHeight: section.fitMaxHeight,
+                        overflowY: "auto",
+                      }
+                    : undefined
+                }
+              >
+                {section.body}
+              </div>
+            ) : null}
             {next ? (
+              // Takes no height of its own and straddles the seam below it, so
+              // the line you see and the line you grab are the same line. Four
+              // pixels either side: a 1px target is one nobody can hit.
               <div
                 role="separator"
                 aria-orientation="horizontal"
@@ -257,10 +294,10 @@ export function PanelStack({
                 onPointerMove={onHandleMove}
                 onPointerUp={onHandleUp}
                 onPointerCancel={onHandleUp}
-                className="group relative z-10 h-1 shrink-0 cursor-row-resize touch-none"
+                className="group relative z-10 h-0 shrink-0 cursor-row-resize touch-none"
               >
-                <div className="absolute inset-x-0 -top-1 bottom-0" />
-                <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-transparent transition-colors group-hover:bg-line-strong" />
+                <div className="absolute inset-x-0 -top-1 h-2" />
+                <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-transparent transition-colors group-hover:bg-blue-400/60" />
               </div>
             ) : null}
           </div>

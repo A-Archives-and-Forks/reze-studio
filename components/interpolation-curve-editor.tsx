@@ -183,7 +183,7 @@ export const InterpolationCurveEditor = memo(function InterpolationCurveEditor({
         // Mono: these are the two control points' 0–127 coordinates, and they
         // change under the pointer — proportional digits make the label jitter
         // as it counts.
-        ctx.font = `9px ${monoFont()}`
+        ctx.font = `10px ${monoFont()}`
         ctx.textAlign = "center"
         ctx.textBaseline = "bottom"
         ctx.fillStyle = cpColor

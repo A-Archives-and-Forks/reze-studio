@@ -43,12 +43,12 @@ export const MaterialList = memo(function MaterialList({
   )
 
   if (materialNames.length === 0) {
-    return <div className="px-3 py-2 text-[11px] text-muted-foreground">{t.materials.empty}</div>
+    return <div className="px-3 py-2 text-[12px] text-muted-foreground">{t.materials.empty}</div>
   }
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex shrink-0 items-center gap-2 border-b border-line px-4 py-1.5 text-[10px] font-medium tracking-widest text-muted-foreground">
+      <div className="flex shrink-0 items-center gap-2 border-b border-line px-4 py-1.5 text-[11px] font-medium tracking-widest text-muted-foreground">
         <EyeIcon className="size-3 shrink-0" aria-label={t.materials.visible} />
         <span className="min-w-0 flex-1 truncate">{t.materials.material}</span>
         <span className="w-28 shrink-0">{t.materials.styleGroup}</span>
@@ -82,7 +82,7 @@ export const MaterialList = memo(function MaterialList({
                   type="button"
                   onClick={() => onToggleSelect(name)}
                   className={cn(
-                    "min-w-0 flex-1 truncate text-left font-mono text-[11px]",
+                    "min-w-0 flex-1 truncate text-left font-mono text-[12px]",
                     isSelected
                       ? "text-blue-400"
                       : visible

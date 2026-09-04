@@ -8,6 +8,7 @@ import {
   addPlacement,
   addTrack,
   newProjectWith,
+  removePlacements,
   setTrackMute,
   setTrackSolo,
   splitPlacement,
@@ -186,4 +187,100 @@ test("two placements of one clip cannot overlap on a lane", () => {
 
   const [a, b] = [...project.tracks[0].placements].sort((x, y) => x.start - y.start)
   assert.ok(b.start >= a.start + 50, `placements overlap: ${a.start} and ${b.start}`)
+})
+
+test("a short clip's pose does not leak past its own span", () => {
+  // The dance keys センター only; the wave keys 左手首 only. Nothing else in the
+  // arrangement drives the wrist, so the wrist is the bone whose influence has
+  // to be bounded — the dance cannot bound it by taking over.
+  const dance = boneClip("センター", [0, 100, 200], 0.4, 200)
+  const wave = boneClip("左手首", [0, 5, 10], 3, 10)
+
+  let project: Project = { name: "p", library: [], tracks: [] }
+  const top = addTrack(project, "Hands")
+  project = top.project
+  const bottom = addTrack(project, "Dance")
+  project = bottom.project
+  const waveClip = addClip(project, "wave", wave)
+  project = waveClip.project
+  const danceClip = addClip(project, "dance", dance)
+  project = danceClip.project
+  project = addPlacement(project, top.trackId, waveClip.clipId, 100).project
+  project = addPlacement(project, bottom.trackId, danceClip.clipId, 0).project
+
+  const baked = bakeProject(project)
+  const wrist = baked.boneTracks.get("左手首")!
+  const rest = new Quat(0, 0, 0, 1)
+
+  // Before it starts and after it ends, the wrist is where an unkeyed bone is.
+  assert.ok(Quat.angleTo(evalBoneTrackAt(wrist, 0).rotation, rest) < 1e-6, "the pose arrived before the clip did")
+  assert.ok(Quat.angleTo(evalBoneTrackAt(wrist, 99).rotation, rest) < 1e-6, "the pose arrived before the clip did")
+  assert.ok(Quat.angleTo(evalBoneTrackAt(wrist, 150).rotation, rest) < 1e-6, "the pose outlived the clip")
+  assert.ok(Quat.angleTo(evalBoneTrackAt(wrist, 200).rotation, rest) < 1e-6, "the pose outlived the clip")
+  // Inside, it plays.
+  assert.ok(poseGap(baked, 105, wave, 5, "左手首") < 0.5, "the clip is not playing inside its own span")
+})
+
+test("a clip that runs to the end of the arrangement still holds", () => {
+  // Nothing follows it, so there is no gap to bound — and a rest key on the
+  // final frame would snap the model to a T-pose as the timeline finishes.
+  const source = boneClip("左手首", [0, 60], 1, 120)
+  const project = newProjectWith("take", source)
+  const keys = bakeProject(project).boneTracks.get("左手首")!
+  assert.equal(keys.length, 2)
+  assert.deepEqual(
+    keys.map((k) => k.frame),
+    [0, 60],
+  )
+})
+
+test("an empty arrangement plays nothing", () => {
+  // The timeline is what plays. Deleting the last block used to leave the clip
+  // it held still running, because the engine was handed the active clip
+  // whenever nothing was placed.
+  const source = boneClip("左手首", [0, 30, 60], 1, 60)
+  let project = newProjectWith("take", source)
+  project = removePlacements(project, [project.tracks[0].placements[0].id])
+
+  const baked = bakeProject(project)
+  assert.equal(baked.boneTracks.size, 0, "a placement's motion outlived the placement")
+  assert.equal(baked.morphTracks.size, 0)
+  // Still long enough to have a ruler to put things back onto.
+  assert.ok(baked.frameCount > 0)
+})
+
+test("a gap between two placements holds the pose, and the ends do not", () => {
+  // Two takes of the same bone with a gap between them, and both well inside
+  // an arrangement that continues past them on another lane.
+  const take = boneClip("左手首", [0, 20], 2, 20)
+  const bed = boneClip("センター", [0, 400], 0.1, 400)
+
+  let project: Project = { name: "p", library: [], tracks: [] }
+  const hands = addTrack(project, "Hands")
+  project = hands.project
+  const under = addTrack(project, "Bed")
+  project = under.project
+  const takeClip = addClip(project, "take", take)
+  project = takeClip.project
+  const bedClip = addClip(project, "bed", bed)
+  project = bedClip.project
+  project = addPlacement(project, hands.trackId, takeClip.clipId, 100).project
+  project = addPlacement(project, hands.trackId, takeClip.clipId, 300).project
+  project = addPlacement(project, under.trackId, bedClip.clipId, 0).project
+
+  const wrist = bakeProject(project).boneTracks.get("左手首")!
+  const rest = new Quat(0, 0, 0, 1)
+  const endOfFirst = evalBoneTrackAt(wrist, 119).rotation
+
+  // Across the gap it stays where the first placement left it, rather than
+  // lurching out to rest and back.
+  for (const f of [130, 200, 280, 298]) {
+    const gap = (Quat.angleTo(evalBoneTrackAt(wrist, f).rotation, endOfFirst) * 180) / Math.PI
+    assert.ok(gap < 0.5, `frame ${f} drifted ${gap}° during the gap`)
+  }
+  assert.ok(Quat.angleTo(endOfFirst, rest) > 0.01, "the test bone never left rest, so it proves nothing")
+
+  // The ends still bound it: nothing before the first, nothing after the last.
+  assert.ok(Quat.angleTo(evalBoneTrackAt(wrist, 0).rotation, rest) < 1e-6, "the pose arrived before the clip")
+  assert.ok(Quat.angleTo(evalBoneTrackAt(wrist, 380).rotation, rest) < 1e-6, "the pose outlived the clip")
 })

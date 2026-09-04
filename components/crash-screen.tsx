@@ -131,7 +131,7 @@ export function CrashScreen({
         </div>
 
         {open && (
-          <pre className="mt-3 max-h-72 overflow-auto rounded-lg border border-border bg-background p-3 font-mono text-[11px] leading-relaxed break-words whitespace-pre-wrap text-muted-foreground select-text">
+          <pre className="mt-3 max-h-72 overflow-auto rounded-lg border border-border bg-background p-3 font-mono text-[12px] leading-relaxed break-words whitespace-pre-wrap text-muted-foreground select-text">
             {report}
           </pre>
         )}

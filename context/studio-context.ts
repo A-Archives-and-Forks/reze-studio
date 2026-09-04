@@ -16,7 +16,17 @@ import {
 } from "react"
 import type { AnimationClip, CameraKeyframe } from "reze-engine"
 import { clipAfterKeyframeEdit, cloneAnimationClip } from "@/lib/utils"
-import { newId, type ClipId, type LibraryClip } from "@/lib/project"
+import {
+  emptyTrack,
+  findPlacement,
+  normalizeLanes,
+  newId,
+  type ClipId,
+  type LibraryClip,
+  type PlacementId,
+  type Project,
+  type Track,
+} from "@/lib/project"
 
 const HISTORY_LIMIT = 100
 
@@ -45,8 +55,23 @@ export type StudioState = {
    * objects that will eventually not be.
    */
   library: LibraryClip[]
+  /**
+   * The arrangement: which clips play where, and in what priority.
+   *
+   * Index 0 is the top lane and the top lane wins — see lib/bake.ts. Kept
+   * beside `library` rather than inside one `Project` object only because the
+   * library predates it and half the app already subscribes to that slice;
+   * `projectOf` below hands the two to the pure operations as the Project they
+   * are.
+   */
+  tracks: Track[]
   /** Which library entry `clip` belongs to. Null only before the first load. */
   activeClipId: ClipId | null
+  /** The placement being edited, when the edit came through the arrangement.
+   *  Its offset is what puts the Keys view in arrangement time. */
+  activePlacementId: PlacementId | null
+  /** Arrange-view selection. Not in history — picking a block is not an edit. */
+  selectedPlacementIds: PlacementId[]
   clip: AnimationClip | null
   clipDisplayName: string
   selectedBone: string | null
@@ -102,10 +127,16 @@ export type StudioState = {
   future: HistoryEntry[]
 }
 
-/** One undo step. The clip and the camera move together: an edit to either is
- *  a change to the same document, and undoing a camera key should not silently
- *  roll a bone edit back with it (or vice versa). */
-type HistoryEntry = { clip: AnimationClip | null; camera: CameraKeyframe[] }
+/** One undo step. The clip, the arrangement and the camera move together: an
+ *  edit to any of them is a change to the same document, and undoing a camera
+ *  key should not silently roll a bone edit back with it (or vice versa). */
+type HistoryEntry = { clip: AnimationClip | null; camera: CameraKeyframe[]; tracks: Track[] }
+
+/** The library and the arrangement, as the pure operations in lib/project.ts
+ *  want them. The name is the display name, which those operations never read. */
+export function projectOf(state: Pick<StudioState, "library" | "tracks" | "clipDisplayName">): Project {
+  return { name: state.clipDisplayName, library: state.library, tracks: state.tracks }
+}
 
 export type StudioClipCommit = Dispatch<SetStateAction<AnimationClip | null>>
 export type StudioKeyframesSetter = Dispatch<SetStateAction<SelectedKeyframe[]>>
@@ -123,7 +154,14 @@ export type StudioActions = {
   openClip: (name: string, clip: AnimationClip) => void
   /** Put a whole library back, from a saved draft. No history — a restore is
    *  where the document starts, not something to undo past. */
-  restoreLibrary: (library: LibraryClip[], activeClipId: ClipId | null) => void
+  restoreLibrary: (library: LibraryClip[], tracks: Track[], activeClipId: ClipId | null) => void
+  /** An arrangement edit — move, trim, split, add or remove a placement, or a
+   *  whole-track change. Undoable, and it re-derives the active clip when the
+   *  placement being edited is no longer there. */
+  commitProject: (next: Project) => void
+  /** Edit the clip this placement plays, in arrangement time. */
+  setActivePlacement: (id: PlacementId | null) => void
+  setSelectedPlacements: Dispatch<SetStateAction<PlacementId[]>>
   removeLibraryClip: (id: ClipId) => void
   renameLibraryClip: (id: ClipId, name: string) => void
   /** Load a clip without recording history — for VMD imports, PMX swaps,
@@ -148,7 +186,10 @@ export type StudioActions = {
 
 const INITIAL_STATE: StudioState = {
   library: [],
+  tracks: [],
   activeClipId: null,
+  activePlacementId: null,
+  selectedPlacementIds: [],
   clip: null,
   clipDisplayName: "clip",
   selectedBone: null,
@@ -227,13 +268,17 @@ function createStudioStore(): StudioStore {
    *  recorded — but a null clip WITH a camera track still is: the camera is
    *  half the document and can be edited on its own. */
   const pushPast = (past: HistoryEntry[], snap: HistoryEntry): HistoryEntry[] => {
-    if (snap.clip == null && snap.camera.length === 0) return past
+    if (snap.clip == null && snap.camera.length === 0 && snap.tracks.length === 0) return past
     const next = past.length >= HISTORY_LIMIT ? past.slice(past.length - HISTORY_LIMIT + 1) : past.slice()
     next.push(snap)
     return next
   }
   /** The state's current snapshot, as one history entry. */
-  const snapshotOf = (st: StudioState): HistoryEntry => ({ clip: st.clipSnapshot, camera: st.cameraSnapshot })
+  const snapshotOf = (st: StudioState): HistoryEntry => ({
+    clip: st.clipSnapshot,
+    camera: st.cameraSnapshot,
+    tracks: st.tracks,
+  })
 
   const actions: StudioActions = {
     commit: (payload) => {
@@ -288,18 +333,42 @@ function createStudioStore(): StudioStore {
 
     importClip: (name, clip) => {
       const entry: LibraryClip = { id: newId(), name, clip: clipAfterKeyframeEdit(clip) }
-      set({ ...state, library: [...state.library, entry] })
+      // Placed as well as filed. A clip that is only in the library is invisible
+      // in the arrangement, and the arrangement is where it gets used — so an
+      // import lands after whatever the first lane already holds, which is the
+      // one position that cannot displace anything.
+      const lanes = state.tracks.length > 0 ? state.tracks : [emptyTrack("Track 1")]
+      const library = [...state.library, entry]
+      const first = lanes[0]
+      const after = first.placements.reduce((end, p) => {
+        const lib = library.find((c) => c.id === p.clipId)
+        return lib ? Math.max(end, p.start + Math.max(1, (p.out ?? lib.clip.frameCount) - p.in)) : end
+      }, 0)
+      const placement = { id: newId(), clipId: entry.id, start: after, in: 0, out: null }
+      set({
+        ...state,
+        library,
+        tracks: normalizeLanes(lanes.map((t, i) => (i === 0 ? { ...t, placements: [...t.placements, placement] } : t))),
+        past: pushPast(state.past, snapshotOf(state)),
+        future: [],
+      })
       return entry.id
     },
 
     activateClip: (id) => {
       const entry = state.library.find((c) => c.id === id)
       if (!entry || id === state.activeClipId) return
-      // The working clip becomes the entry's own object, so the drag paths keep
-      // mutating in place exactly as they did with one clip.
+      // The PLACEMENT moves with the clip, not just the clip. Its offset is
+      // what puts the keyframe editor in arrangement time, so leaving it on the
+      // previous clip's placement meant opening a clip that sits at frame 300
+      // and editing it against a ruler still describing one that sits at 0.
+      // Its first placement, in lane order — the same one a double-click on a
+      // block would have chosen.
+      const placement = state.tracks.flatMap((t) => t.placements).find((p) => p.clipId === id) ?? null
       set({
         ...state,
         activeClipId: id,
+        activePlacementId: placement?.id ?? null,
         clip: entry.clip,
         clipDisplayName: entry.name,
         clipSnapshot: cloneAnimationClip(entry.clip),
@@ -314,10 +383,14 @@ function createStudioStore(): StudioStore {
     openClip: (name, clip) => {
       const finalNext = clipAfterKeyframeEdit(clip)
       const entry: LibraryClip = { id: newId(), name, clip: finalNext }
+      const placement = { id: newId(), clipId: entry.id, start: 0, in: 0, out: null }
       set({
         ...state,
         library: [entry],
+        tracks: normalizeLanes([{ ...emptyTrack("Track 1"), placements: [placement] }]),
+        activePlacementId: placement.id,
         activeClipId: entry.id,
+        selectedPlacementIds: [],
         clip: finalNext,
         clipDisplayName: name,
         clipSnapshot: cloneAnimationClip(finalNext),
@@ -327,11 +400,57 @@ function createStudioStore(): StudioStore {
       })
     },
 
-    restoreLibrary: (library, activeClipId) => {
+    commitProject: (next) => {
+      // A placement can vanish under the edit that is being committed (a
+      // delete, or a split that replaces it with two). Falling back to the
+      // first placement rather than to nothing keeps the editor pointed at
+      // something, which is what every panel downstream assumes.
+      const stillThere = state.activePlacementId != null && findPlacement(next, state.activePlacementId) != null
+      const fallback = next.tracks.flatMap((t) => t.placements)[0] ?? null
+      const active = stillThere ? findPlacement(next, state.activePlacementId!) : fallback ? findPlacement(next, fallback.id) : null
+      set({
+        ...state,
+        library: next.library,
+        tracks: normalizeLanes(next.tracks),
+        activePlacementId: active?.placement.id ?? null,
+        activeClipId: active?.libraryClip.id ?? state.activeClipId,
+        clip: active?.libraryClip.clip ?? state.clip,
+        clipDisplayName: active?.libraryClip.name ?? state.clipDisplayName,
+        clipSnapshot: active ? cloneAnimationClip(active.libraryClip.clip) : state.clipSnapshot,
+        selectedPlacementIds: state.selectedPlacementIds.filter((id) => findPlacement(next, id) != null),
+        past: pushPast(state.past, snapshotOf(state)),
+        future: [],
+      })
+    },
+
+    setActivePlacement: (id) => {
+      if (id === state.activePlacementId) return
+      const found = id != null ? findPlacement(projectOf(state), id) : null
+      if (id != null && !found) return
+      set({
+        ...state,
+        activePlacementId: id,
+        activeClipId: found?.libraryClip.id ?? state.activeClipId,
+        clip: found?.libraryClip.clip ?? state.clip,
+        clipDisplayName: found?.libraryClip.name ?? state.clipDisplayName,
+        clipSnapshot: found ? cloneAnimationClip(found.libraryClip.clip) : state.clipSnapshot,
+        selectedKeyframes: [],
+        past: [],
+        future: [],
+      })
+    },
+
+    setSelectedPlacements: (payload) => update("selectedPlacementIds", payload),
+
+    restoreLibrary: (library, tracks, activeClipId) => {
       const active = library.find((c) => c.id === activeClipId) ?? library[0] ?? null
+      const lanes = normalizeLanes(tracks)
+      const activePlacement = lanes.flatMap((t) => t.placements).find((p) => p.clipId === active?.id) ?? null
       set({
         ...state,
         library,
+        tracks: lanes,
+        activePlacementId: activePlacement?.id ?? null,
         activeClipId: active?.id ?? null,
         clip: active?.clip ?? null,
         clipDisplayName: active?.name ?? "clip",
@@ -345,16 +464,23 @@ function createStudioStore(): StudioStore {
     removeLibraryClip: (id) => {
       const library = state.library.filter((c) => c.id !== id)
       if (library.length === state.library.length) return
+      // Its placements go with it — a lane pointing at a clip that is gone has
+      // nothing to draw and nothing to play.
+      const tracks = normalizeLanes(state.tracks.map((t) => ({ ...t, placements: t.placements.filter((p) => p.clipId !== id) })))
       if (id !== state.activeClipId) {
-        set({ ...state, library })
+        set({ ...state, library, tracks })
         return
       }
       // Removing what is being edited moves the edit to whatever is left, and
       // to an empty document when nothing is.
       const next = library[0] ?? null
+      const nextPlacement = tracks.flatMap((t) => t.placements).find((p) => p.clipId === next?.id) ?? null
       set({
         ...state,
         library,
+        tracks,
+        activePlacementId: nextPlacement?.id ?? null,
+        selectedPlacementIds: [],
         activeClipId: next?.id ?? null,
         clip: next?.clip ?? null,
         clipDisplayName: next?.name ?? "clip",
@@ -429,6 +555,7 @@ function createStudioStore(): StudioStore {
         ...state,
         clip: restored,
         library: libraryWithActiveClip(state, restored),
+        tracks: popped.tracks,
         clipSnapshot: popped.clip,
         cameraTrack: cloneCameraTrack(popped.camera),
         cameraSnapshot: popped.camera,
@@ -446,6 +573,7 @@ function createStudioStore(): StudioStore {
         ...state,
         clip: restored,
         library: libraryWithActiveClip(state, restored),
+        tracks: popped.tracks,
         clipSnapshot: popped.clip,
         cameraTrack: cloneCameraTrack(popped.camera),
         cameraSnapshot: popped.camera,

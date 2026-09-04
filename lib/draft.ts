@@ -97,6 +97,8 @@ type StoredDraft = DraftExtras & {
   /** The pre-library shape: one clip, no library. Still read, never written. */
   clip?: SerializedClip
   library?: SerializedLibraryEntry[]
+  /** Plain data already — ids, numbers and booleans — so it stores as it is. */
+  tracks?: DraftTrack[]
   activeClipId?: string
 }
 
@@ -164,6 +166,7 @@ let pendingRun: (() => void) | null = null
 async function write(
   clipDisplayName: string,
   library: readonly DraftLibraryEntry[],
+  tracks: readonly DraftTrack[],
   activeClipId: string | null,
   extras: DraftExtras,
 ) {
@@ -174,6 +177,7 @@ async function write(
       ...extras,
       clipDisplayName,
       library: library.map((e) => ({ id: e.id, name: e.name, clip: serializeClip(e.clip) })),
+      tracks: tracks.map((t) => ({ ...t, placements: t.placements.map((p) => ({ ...p })) })),
       activeClipId: activeClipId ?? undefined,
     }
     await new Promise<void>((resolve, reject) => {
@@ -193,17 +197,20 @@ async function write(
 
 /** What the store holds, in the shape this module needs to write it. */
 export type DraftLibraryEntry = { id: string; name: string; clip: AnimationClip }
+export type DraftPlacement = { id: string; clipId: string; start: number; in: number; out: number | null }
+export type DraftTrack = { id: string; name: string; mute: boolean; solo: boolean; placements: DraftPlacement[] }
 
 export function saveDraftSoon(
   clipDisplayName: string,
   library: readonly DraftLibraryEntry[],
+  tracks: readonly DraftTrack[],
   activeClipId: string | null,
   extras: DraftExtras = {},
   ms = 150,
 ): void {
   if (pendingWrite) clearTimeout(pendingWrite)
   pendingRun = () => {
-    void write(clipDisplayName, library, activeClipId, extras)
+    void write(clipDisplayName, library, tracks, activeClipId, extras)
   }
   pendingWrite = setTimeout(() => {
     pendingWrite = null
@@ -232,6 +239,7 @@ export function flushDraftWrite(): void {
 export type LoadedDraft = DraftExtras & {
   clipDisplayName: string
   library: DraftLibraryEntry[]
+  tracks: DraftTrack[]
   activeClipId: string | null
 }
 
@@ -257,14 +265,37 @@ export async function loadDraft(): Promise<LoadedDraft | null> {
         : rec.clip
           ? [{ id: "restored", name: rec.clipDisplayName, clip: rec.clip }]
           : []
-    if (stored.length === 0) {
-      console.info("[draft] stored draft held no clips")
-      return null
-    }
+    // An empty library is a RESTORE, not a miss. Someone deleted every clip;
+    // reporting that as "no draft" would send the boot down the fresh-start
+    // path and hand them the demo back on the next reload.
     const library = stored.map((e) => ({ id: e.id, name: e.name, clip: deserializeClip(e.clip) }))
-    const activeClipId = library.some((e) => e.id === rec.activeClipId) ? rec.activeClipId! : library[0].id
+    const activeClipId = library.some((e) => e.id === rec.activeClipId)
+      ? rec.activeClipId!
+      : (library[0]?.id ?? null)
+    // A record from before the arrangement existed gets one lane holding every
+    // clip it had, end to end — the same thing importing them would produce.
+    const known = new Set(library.map((e) => e.id))
+    let tracks: DraftTrack[] = (rec.tracks ?? [])
+      .map((t) => ({ ...t, placements: t.placements.filter((p) => known.has(p.clipId)) }))
+      .filter((t, i, all) => t.placements.length > 0 || all.length === 1 || i === 0)
+    if (tracks.length === 0) {
+      let start = 0
+      tracks = [
+        {
+          id: "restored-track",
+          name: "Track 1",
+          mute: false,
+          solo: false,
+          placements: library.map((e) => {
+            const p = { id: `restored-${e.id}`, clipId: e.id, start, in: 0, out: null }
+            start += Math.max(1, e.clip.frameCount)
+            return p
+          }),
+        },
+      ]
+    }
     console.info(`[draft] restoring "${rec.clipDisplayName}" — ${library.length} clip(s)`)
-    return { ...rec, library, activeClipId }
+    return { ...rec, library, tracks, activeClipId }
   } catch (e) {
     console.warn("[draft] stored draft failed to load — starting fresh", e)
     return null
